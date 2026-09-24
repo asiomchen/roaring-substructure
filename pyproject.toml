@@ -1,0 +1,29 @@
+[project]
+name = "roaring-substructure"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+# reaction-utils requires pandas<3 and is not published for Python 3.14+.
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "datamol>=0.13.0",
+    "huggingface-hub>=1.32.0",
+    "joblib>=1.6.0",
+    "numpy>=2.0",
+    "ord-schema>=0.8.3",
+    "pandas<3",
+    "psutil>=7.2.2",
+    "psycopg[binary]>=3.3.6",
+    "pyarrow>=25.0.1",
+    "pyroaring>=1.1.0",
+    "rdkit==2026.3.6",
+    "reaction-utils>=1.9.4",
+    "ruff>=0.16.8",
+    "seaborn>=0.13.2",
+    "tqdm>=4.70.1",
+]
+
+[dependency-groups]
+dev = [
+    "rdkit-stubs>=0.8",
+]

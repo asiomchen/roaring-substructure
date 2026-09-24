@@ -1,0 +1,60 @@
+# RDKit cartridge server for the PostgreSQL substructure benchmark.
+#
+#   docker compose up -d --wait     # start (bench.py --phase setup does this)
+#   docker compose down -v          # drop the database and its volume
+#
+# The server major version is PG_MAJOR (default 18). Switching it needs a fresh volume,
+# because a data directory cannot be reused across majors:
+#
+#   PG_MAJOR=16 docker compose down -v && PG_MAJOR=16 docker compose up -d --wait
+#
+# The three -c settings decide whether the database's answers can agree with the
+# in-process benchmarks, so they are pinned here rather than left to defaults:
+#
+#   rdkit.sss_fp_size   2048, the size of the Pattern fingerprint the GiST index stores
+#                       as its signature. It is baked into the index at build time and
+#                       checked at query time, so it must not change between phases.
+#   rdkit.do_chiral_sss off, matching Python's default non-chiral HasSubstructMatch.
+#   max_parallel_workers_per_gather 0, because 01-03 are single-threaded and a parallel
+#                       scan would flatter the database on the seq-scan phase.
+#
+# Host port 55434 rather than 5432: the molalchemy and cheminfo.dev stacks already claim
+# 5432 on this machine.
+services:
+  db:
+    image: ghcr.io/asiomchen/rdkit-postgres:postgres${PG_MAJOR:-18}-rdkit2026.03.6
+    # Every setting below is overridable from the environment, so a configuration can be
+    # measured with one variable. The defaults are PostgreSQL's and the cartridge's own
+    # except the three marked "pinned", which are what let the answers agree with Python.
+    #
+    #   SSS_FP_SIZE          rdkit.sss_fp_size, the screening fingerprint (pinned 2048)
+    #   DO_CHIRAL_SSS        rdkit.do_chiral_sss, matching semantics (pinned off)
+    #   SHARED_BUFFERS       documented as improving search performance
+    #   WORK_MEM             documented as improving search performance
+    #   SYNCHRONOUS_COMMIT   documented as improving load and index build
+    #   FULL_PAGE_WRITES     documented as improving load and index build
+    command: ["postgres",
+              "-c", "rdkit.sss_fp_size=${SSS_FP_SIZE:-2048}",
+              "-c", "rdkit.do_chiral_sss=${DO_CHIRAL_SSS:-off}",
+              "-c", "rdkit.do_enhanced_stereo_sss=off",
+              "-c", "max_parallel_workers_per_gather=0",
+              "-c", "shared_buffers=${SHARED_BUFFERS:-128MB}",
+              "-c", "work_mem=${WORK_MEM:-4MB}",
+              "-c", "synchronous_commit=${SYNCHRONOUS_COMMIT:-on}",
+              "-c", "full_page_writes=${FULL_PAGE_WRITES:-on}"]
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:55434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:
