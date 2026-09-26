@@ -293,7 +293,7 @@ uv run benchmarks/05_roaring_postings.py
 uv run benchmarks/05a_numpy_postings.py
 uv run benchmarks/06_rust_postings.py
 uv run benchmarks/07_rust_postings_process.py
-uv run benchmarks/09_rust_native.py
+uv run benchmarks/08_rust_native.py
 
 PG_MAJOR=18 uv run benchmarks/postgres/bench.py --phase setup   # pulls and starts the server
 for phase in load index match verify; do
