@@ -17,6 +17,7 @@ dependencies = [
     "pyarrow>=25.0.1",
     "pyroaring>=1.1.0",
     "rdkit==2026.3.6",
+    "rust-index",
     "reaction-utils>=1.9.4",
     "ruff>=0.16.8",
     "seaborn>=0.13.2",
@@ -27,3 +28,6 @@ dependencies = [
 dev = [
     "rdkit-stubs>=0.8",
 ]
+
+[tool.uv.sources]
+rust-index = { path = "rust_index", editable = true }
