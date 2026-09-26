@@ -1,5 +1,7 @@
 """Compare packed NumPy uint64 postings with the Rust posting index.
 
+Author: Marcin Kowiel + Claude
+
 Both variants use the same corpus, 128 absent-bit postings by default, a full
 fingerprint subset screen, and RDKit's exact substructure match. Each variant
 runs in its own process so resident memory measurements do not overlap.

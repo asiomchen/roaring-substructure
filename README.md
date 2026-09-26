@@ -285,6 +285,8 @@ indicative to a few percent, not to the last digit.
 ## Reproducing
 
 ```bash
+git lfs pull
+
 uv run benchmarks/01_naive.py
 uv run benchmarks/02_pattern.py
 uv run benchmarks/03_roaring_approach.py

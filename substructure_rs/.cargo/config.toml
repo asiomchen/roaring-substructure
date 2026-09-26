@@ -4,3 +4,5 @@ rustflags = ["-C", "target-cpu=native"]
 # Skip proc-macro2's compiler probe, whose cleanup DeepGuard blocks.
 [env]
 RUSTC_STAGE = "0"
+# pyo3-build-config would run Python to read this; DeepGuard blocks that.
+PYO3_CONFIG_FILE = { value = "pyo3-config.txt", relative = true }

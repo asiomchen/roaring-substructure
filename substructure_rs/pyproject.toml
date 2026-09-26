@@ -5,12 +5,16 @@ build-backend = "maturin"
 [project]
 name = "substructure-rs"
 version = "0.1.0"
-description = "Pure-Rust SMILES/SMARTS substructure search (benchmark 09), installed as a binary"
+description = "Pure-Rust SMILES/SMARTS substructure search (benchmark 08)"
 requires-python = ">=3.13"
 
+# `substructure_rs [options]` runs the same command line as the Rust binary.
+[project.scripts]
+substructure_rs = "substructure_rs:main"
+
 [tool.maturin]
-bindings = "bin"
+features = ["python"]
 
 # Rebuild on `uv sync` / `uv run` whenever the Rust sources change.
 [tool.uv]
-cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }, { file = "src/**/*.rs" }]
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }, { file = "src/**/*.rs" }, { file = "pyo3-config.txt" }]
