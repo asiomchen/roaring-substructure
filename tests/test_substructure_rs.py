@@ -62,6 +62,23 @@ class SubstructureRsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             substructure_rs.run(queries_file="missing.parquet")
 
+    def test_fingerprint_kinds_and_sizes_agree(self):
+        digest = self.run_fn(runs=1)["digest"]
+        for kind in substructure_rs.FP_KINDS:
+            for bits in (512, 1024, 2048, 4096, 8192):
+                report = self.run_fn(runs=1, fp_kind=kind, fp_bits=bits)
+                self.assertEqual(report["fp_kind"], kind)
+                self.assertEqual(report["fp_bits"], bits)
+                self.assertEqual(report["digest"], digest, f"{kind} {bits}")
+
+    def test_bad_fingerprint_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.run_fn(fp_kind="ecfp4")
+        with self.assertRaises(ValueError):
+            self.run_fn(fp_bits=3000)
+        with self.assertRaises(ValueError):
+            self.run_fn(fp_bits=1024, postings=2048)
+
     def test_command_matches_function(self):
         digest = self.run_fn(runs=1)["digest"]
         command = Path(sys.executable).parent / "substructure_rs"

@@ -3,7 +3,7 @@
 //!
 //! Author: Marcin Kowiel + Claude
 
-use crate::fingerprint::{query_fp, target_fp};
+use crate::fingerprint::{fp_kind, query_fp, target_fp, Fp, FP_KINDS};
 use crate::index::Index;
 use crate::matcher::{has_match, Plan, Target};
 use crate::mol::{parse_smiles, BondType, Mol};
@@ -189,26 +189,42 @@ fn fingerprint_never_rejects_a_match() {
         "[C,N]=O",
     ];
     let targets = ["COc1c#cccc1", "CC(=O)Nc1ccncc1", "CC(=O)OC", "c1ccccc1-c1ccccc1", "CN=O"];
-    for s in targets {
-        let t = Target::new(&parse_smiles(s).unwrap());
-        let tfp = target_fp(&t);
-        for smarts in queries {
-            let q = parse_smarts(smarts).unwrap();
-            if has_match(&q, &Plan::new(&q), &t) {
-                let qfp = query_fp(&q);
-                assert!(qfp.iter().zip(&tfp).all(|(q, t)| q & !t == 0), "{smarts} in {s}");
+    for kind in &FP_KINDS {
+        for s in targets {
+            let t = Target::new(&parse_smiles(s).unwrap());
+            let tfp: Fp<16> = target_fp(kind, &t);
+            for smarts in queries {
+                let q = parse_smarts(smarts).unwrap();
+                if has_match(&q, &Plan::new(&q), &t) {
+                    let qfp: Fp<16> = query_fp(kind, &q);
+                    assert!(qfp.iter().zip(&tfp).all(|(q, t)| q & !t == 0), "{} {smarts} in {s}", kind.name);
+                }
             }
         }
     }
 }
 
 #[test]
+fn cycles_and_branches_screen_out_non_matches() {
+    // Six-membered ring against cyclopentane plus a chain; a tertiary centre against a chain.
+    for (kind, smarts, smiles) in
+        [("paths4+cycles", "C1CCCCC1", "C1CCCC1CCCCCC"), ("paths4+branches", "CC(C)C", "CCCCCC")]
+    {
+        let kind = fp_kind(kind).unwrap();
+        let tfp: Fp<64> = target_fp(&kind, &Target::new(&parse_smiles(smiles).unwrap()));
+        let qfp: Fp<64> = query_fp(&kind, &parse_smarts(smarts).unwrap());
+        assert!(qfp.iter().zip(&tfp).any(|(q, t)| q & !t != 0), "{} {smarts} in {smiles}", kind.name);
+    }
+}
+
+#[test]
 fn index_returns_exact_matches() {
     let smarts = ["c1ccccc1", "C=O", "[#7&a]", "C#N", "[O&-]"];
-    let index = Index::build(smarts.iter().map(|s| parse_smarts(s).unwrap()).collect());
+    let kind = fp_kind("paths4").unwrap();
+    let index = Index::<32>::build(&kind, smarts.iter().map(|s| parse_smarts(s).unwrap()).collect());
     let t = Target::new(&parse_smiles("O=Cc1ccncc1").unwrap());
     for limit in [1, 128] {
-        let (_, found) = index.match_one(&t, &target_fp(&t), limit);
+        let (_, found) = index.match_one(&t, &target_fp(&kind, &t), limit);
         assert_eq!(found, vec![1, 2], "posting limit {limit}");
     }
 }

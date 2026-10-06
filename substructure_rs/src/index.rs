@@ -2,29 +2,33 @@
 //!
 //! Author: Marcin Kowiel + Claude
 
-use crate::fingerprint::{query_fp, Fp, FP_BITS};
+use crate::fingerprint::{query_fp, Fp, FpKind};
 use crate::matcher::{has_match, Plan, Target};
 use crate::smarts::Query;
 use rayon::prelude::*;
 
-pub struct Index {
+/// `W` is the fingerprint width in 64-bit words.
+pub struct Index<const W: usize> {
     pub queries: Vec<Query>,
     plans: Vec<Plan>,
-    fps: Vec<Fp>,
-    /// `FP_BITS` rows of `words` u64s.
+    fps: Vec<Fp<W>>,
+    /// `64 * W` rows of `words` u64s.
     postings: Vec<u64>,
     words: usize,
     ranked_bits: Vec<u16>,
     all_ids: Vec<u64>,
 }
 
-impl Index {
-    pub fn build(queries: Vec<Query>) -> Self {
+impl<const W: usize> Index<W> {
+    const BITS: usize = 64 * W;
+
+    pub fn build(kind: &FpKind, queries: Vec<Query>) -> Self {
         let n = queries.len();
         let words = n.div_ceil(64);
-        let (fps, plans): (Vec<Fp>, Vec<Plan>) = queries.par_iter().map(|q| (query_fp(q), Plan::new(q))).unzip();
-        let mut postings = vec![0u64; FP_BITS * words];
-        let mut counts = vec![0usize; FP_BITS];
+        let (fps, plans): (Vec<Fp<W>>, Vec<Plan>) =
+            queries.par_iter().map(|q| (query_fp(kind, q), Plan::new(q))).unzip();
+        let mut postings = vec![0u64; Self::BITS * words];
+        let mut counts = vec![0usize; Self::BITS];
         for (idx, fp) in fps.iter().enumerate() {
             for (w, &word) in fp.iter().enumerate() {
                 let mut word = word;
@@ -36,7 +40,7 @@ impl Index {
                 }
             }
         }
-        let mut ranked_bits: Vec<u16> = (0..FP_BITS as u16).collect();
+        let mut ranked_bits: Vec<u16> = (0..Self::BITS).map(|b| b as u16).collect();
         ranked_bits.sort_by(|&a, &b| counts[b as usize].cmp(&counts[a as usize]));
         let mut all_ids = vec![u64::MAX; words];
         if n % 64 != 0 {
@@ -46,11 +50,17 @@ impl Index {
     }
 
     pub fn nbytes(&self) -> usize {
-        8 * (self.fps.len() * self.fps.first().map_or(0, |f| f.len()) + self.postings.len() + self.all_ids.len())
+        8 * (self.fps.len() * W + self.postings.len() + self.all_ids.len())
+    }
+
+    /// Mean fraction of bits set in the query fingerprints.
+    pub fn query_density(&self) -> f64 {
+        let ones: u64 = self.fps.iter().flatten().map(|w| w.count_ones() as u64).sum();
+        ones as f64 / (self.fps.len().max(1) * Self::BITS) as f64
     }
 
     /// Screened candidate query IDs, ascending.
-    pub fn screen(&self, fp: &Fp, posting_limit: usize, out: &mut Vec<u32>) {
+    pub fn screen(&self, fp: &Fp<W>, posting_limit: usize, out: &mut Vec<u32>) {
         let mut remaining = self.all_ids.clone();
         let mut selected = 0;
         for &bit in &self.ranked_bits {
@@ -79,7 +89,7 @@ impl Index {
     }
 
     /// Candidates and matching query IDs for one reactant.
-    pub fn match_one(&self, target: &Target, fp: &Fp, posting_limit: usize) -> (usize, Vec<u32>) {
+    pub fn match_one(&self, target: &Target, fp: &Fp<W>, posting_limit: usize) -> (usize, Vec<u32>) {
         let mut cands = Vec::new();
         self.screen(fp, posting_limit, &mut cands);
         let n = cands.len();

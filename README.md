@@ -120,6 +120,33 @@ which yields borrowed pointers either way), and dropping the substructure SMARTS
 inner loop — fetching two elements per pair instead of three, and looking the label up only
 on the 0.055% of pairs that match — measured 5.88 s against 5.82 s, below the noise.
 
+### Benchmark 9: fingerprint kinds and sizes in the Rust pipeline
+
+`09_rust_native_fp.py` reruns benchmark 08 once per screening fingerprint: eight
+feature sets (`substructure_rs/src/fingerprint.rs`, `FP_KINDS`) at 512 to 8192 bits
+(16384 is also accepted). `paths4` at 4096 bits is benchmark 08. Every
+configuration returned the same 27,723 matches and the same digest, so each fingerprint
+is a lossless screen. One thread, 128 postings, median of five runs
+(`benchmarks/fp_sweep_1thread.csv`):
+
+| kind | candidates @2048 | @4096 | @8192 | match ms @2048 | @4096 | @8192 |
+|---|---:|---:|---:|---:|---:|---:|
+| `atoms` | 3,101,522 | 3,031,375 | 3,007,897 | 2161 | 2013 | 2213 |
+| `paths2` | 261,012 | 246,688 | 240,897 | 228 | 226 | 247 |
+| `paths4` (08) | 95,748 | 88,651 | 86,771 | 113 | 115 | 133 |
+| `paths4-nocount` | 166,628 | 160,204 | 158,227 | 156 | 189 | 200 |
+| `paths6` | 80,524 | 70,834 | 67,843 | 129 | 133 | 148 |
+| `paths4+branches` | 79,671 | 73,148 | 71,317 | 100 | 105 | 118 |
+| `paths4+cycles` | 84,789 | 78,283 | 76,526 | 107 | 118 | 122 |
+| `paths4+branches+cycles` | 72,477 | 66,453 | 64,765 | **98** | 116 | 119 |
+
+Branch (an atom with three neighbours) and cycle features together cut candidates by 25%
+for about 14% more index-build time; six-bond paths cut a similar share but cost more to
+enumerate per reactant, so they match slower. Counting repeated features is worth 1.8x
+fewer candidates. Doubling the size removes at most 12% of candidates while doubling the
+bytes each screened candidate compares, so 2048 bits is fastest for every kind but
+`atoms` — the same trade-off as the cartridge's `sss_fp_size` above.
+
 ## In PostgreSQL
 
 `benchmarks/postgres/` does the same search with the substructures stored as `qmol` in an
@@ -296,6 +323,7 @@ uv run benchmarks/05a_numpy_postings.py
 uv run benchmarks/06_rust_postings.py
 uv run benchmarks/07_rust_postings_process.py
 uv run benchmarks/08_rust_native.py
+uv run benchmarks/09_rust_native_fp.py --threads 1 --csv benchmarks/fp_sweep_1thread.csv
 
 PG_MAJOR=18 uv run benchmarks/postgres/bench.py --phase setup   # pulls and starts the server
 for phase in load index match verify; do
