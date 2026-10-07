@@ -14,11 +14,17 @@ The kinds (see `substructure_rs/src/fingerprint.rs`):
     paths4-nocount          paths4 with each feature counted once
     paths4+branches         paths4 + every atom with three of its neighbours
     paths4+cycles           paths4 + labelled simple cycles of 3-8 atoms
-    paths4+branches+cycles  all of the above
+    paths4+branches+cycles  paths4 + branches + cycles
+    paths4+long6/long8+branches+cycles
+                            as above, plus element/bond-class-only paths of
+                            5-6 or 5-8 bonds
 
 Sizes default to 512-8192 bits. `paths4` at 4096 bits is benchmark 08.
-Candidates, the pairs that survive the screen, measure the fingerprint independently of the machine; the matching
-time is what the screen is for. Use `--threads 1` for steadier timings.
+Candidates, the pairs that survive the screen, measure the fingerprint
+independently of the machine; the matching time is what the screen is for. Use `--threads 1` for steadier timings.
+The last four columns split matching into reactant fingerprints, the posting
+filter, the full fingerprint check and exact matching, in milliseconds summed
+over threads.
 
     uv run benchmarks/09_rust_native_fp.py
     uv run benchmarks/09_rust_native_fp.py --kinds paths4 paths4+cycles --bits 2048 8192
@@ -39,12 +45,18 @@ COLUMNS = [
     "target_density",
     "build_seconds",
     "index_mib",
+    "posted",
     "candidates",
     "matches",
     "match_median_seconds",
     "match_seconds",
+    "fp_seconds",
+    "postings_seconds",
+    "check_seconds",
+    "exact_seconds",
     "digest",
 ]
+PHASES = ["fp_seconds", "postings_seconds", "check_seconds", "exact_seconds"]
 
 
 def main() -> None:
@@ -80,7 +92,8 @@ def main() -> None:
     rows = []
     header = (
         f"{'kind':<24}{'bits':>6}{'post':>5}{'q set':>7}{'r set':>7}"
-        f"{'build s':>9}{'MiB':>7}{'candidates':>12}{'matches':>9}{'match ms':>10}"
+        f"{'build s':>9}{'MiB':>7}{'posted':>10}{'candidates':>12}{'matches':>9}"
+        f"{'match ms':>10} |{'fp':>6}{'post':>6}{'check':>6}{'exact':>6}"
     )
     print(header)
     print("-" * len(header))
@@ -108,10 +121,12 @@ def main() -> None:
                     "target_density": r["target_density"],
                     "build_seconds": r["build_seconds"],
                     "index_mib": r["index_bytes"] / 2**20,
+                    "posted": r["posted"],
                     "candidates": r["candidates"],
                     "matches": r["matches"],
                     "match_median_seconds": r["match_median_seconds"],
                     "match_seconds": " ".join(f"{t:.4f}" for t in r["match_seconds"]),
+                    **dict(zip(PHASES, r["phase_seconds"])),
                     "digest": r["digest"],
                 }
                 rows.append(row)
@@ -119,8 +134,9 @@ def main() -> None:
                     f"{kind:<24}{bits:>6}{postings:>5}"
                     f"{100 * row['query_density']:>6.1f}%{100 * row['target_density']:>6.1f}%"
                     f"{row['build_seconds']:>9.3f}{row['index_mib']:>7.1f}"
-                    f"{row['candidates']:>12}{row['matches']:>9}"
-                    f"{1000 * row['match_median_seconds']:>10.1f}",
+                    f"{row['posted']:>10}{row['candidates']:>12}{row['matches']:>9}"
+                    f"{1000 * row['match_median_seconds']:>10.1f} |"
+                    + "".join(f"{1000 * row[p]:>6.0f}" for p in PHASES),
                     flush=True,
                 )
                 comparison = r.get("comparison")

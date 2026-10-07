@@ -26,9 +26,11 @@ fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>>
     d.set_item("build_seconds", r.build_seconds)?;
     d.set_item("match_seconds", r.match_seconds.clone())?;
     d.set_item("match_median_seconds", r.match_median())?;
+    d.set_item("phase_seconds", r.phase_seconds.to_vec())?;
     d.set_item("index_bytes", r.index_bytes)?;
     d.set_item("query_density", r.query_density)?;
     d.set_item("target_density", r.target_density)?;
+    d.set_item("posted", r.posted)?;
     d.set_item("candidates", r.candidates)?;
     d.set_item("matches", r.matches)?;
     d.set_item("digest", &r.digest)?;
@@ -77,7 +79,7 @@ fn run<'py>(
     dump_atoms: Option<PathBuf>,
     print_report: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let opts = Options { queries_file, reactants_file, postings, runs, threads, fp_kind, fp_bits, reference, dump_atoms };
+    let opts = Options { queries_file, reactants_file, postings, runs, threads, fp_kind, fp_bits, reference, dump_atoms, analyze: false };
     let report = py.detach(|| crate::run(&opts)).map_err(PyValueError::new_err)?;
     if print_report {
         crate::print_report(&report);

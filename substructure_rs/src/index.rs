@@ -6,6 +6,7 @@ use crate::fingerprint::{query_fp, Fp, FpKind};
 use crate::matcher::{has_match, Plan, Target};
 use crate::smarts::Query;
 use rayon::prelude::*;
+use std::time::Instant;
 
 /// `W` is the fingerprint width in 64-bit words.
 pub struct Index<const W: usize> {
@@ -59,8 +60,9 @@ impl<const W: usize> Index<W> {
         ones as f64 / (self.fps.len().max(1) * Self::BITS) as f64
     }
 
-    /// Screened candidate query IDs, ascending.
-    pub fn screen(&self, fp: &Fp<W>, posting_limit: usize, out: &mut Vec<u32>) {
+    /// Query IDs left after removing the postings of up to `posting_limit`
+    /// of the reactant's absent bits, as a bitmap of `words` u64s.
+    pub fn posting_filter(&self, fp: &Fp<W>, posting_limit: usize) -> Vec<u64> {
         let mut remaining = self.all_ids.clone();
         let mut selected = 0;
         for &bit in &self.ranked_bits {
@@ -76,6 +78,11 @@ impl<const W: usize> Index<W> {
                 }
             }
         }
+        remaining
+    }
+
+    /// IDs from `remaining` whose fingerprint is a subset of `fp`, ascending.
+    pub fn subset_filter(&self, fp: &Fp<W>, remaining: &[u64], out: &mut Vec<u32>) {
         for (w, &word) in remaining.iter().enumerate() {
             let mut word = word;
             while word != 0 {
@@ -88,12 +95,39 @@ impl<const W: usize> Index<W> {
         }
     }
 
-    /// Candidates and matching query IDs for one reactant.
-    pub fn match_one(&self, target: &Target, fp: &Fp<W>, posting_limit: usize) -> (usize, Vec<u32>) {
-        let mut cands = Vec::new();
-        self.screen(fp, posting_limit, &mut cands);
-        let n = cands.len();
-        cands.retain(|&q| has_match(&self.queries[q as usize], &self.plans[q as usize], target));
-        (n, cands)
+    /// Screen and exactly match one reactant, timing each step.
+    pub fn match_one(&self, target: &Target, fp: &Fp<W>, posting_limit: usize) -> Matched {
+        let start = Instant::now();
+        let remaining = self.posting_filter(fp, posting_limit);
+        let posted = remaining.iter().map(|w| w.count_ones() as usize).sum();
+        let t_postings = start.elapsed();
+        let mut found = Vec::new();
+        self.subset_filter(fp, &remaining, &mut found);
+        let candidates = found.len();
+        let t_subset = start.elapsed();
+        found.retain(|&q| has_match(&self.queries[q as usize], &self.plans[q as usize], target));
+        let t_exact = start.elapsed();
+        Matched {
+            posted,
+            candidates,
+            found,
+            seconds: [
+                t_postings.as_secs_f64(),
+                (t_subset - t_postings).as_secs_f64(),
+                (t_exact - t_subset).as_secs_f64(),
+            ],
+        }
     }
+}
+
+/// One reactant's result.
+pub struct Matched {
+    /// Queries left after the posting filter.
+    pub posted: usize,
+    /// Queries left after the full fingerprint check, i.e. sent to exact matching.
+    pub candidates: usize,
+    /// Matching query IDs, ascending.
+    pub found: Vec<u32>,
+    /// Seconds in the posting filter, the fingerprint check and exact matching.
+    pub seconds: [f64; 3],
 }

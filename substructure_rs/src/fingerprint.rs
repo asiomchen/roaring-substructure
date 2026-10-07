@@ -32,6 +32,9 @@ pub struct FpKind {
     pub max_edges: usize,
     /// Longest path using fully specified atoms, in bonds.
     pub max_full_edges: usize,
+    /// Longest path, in bonds, labelled by element and bond class only;
+    /// paths longer than `max_edges` get just this one label.
+    pub long_edges: usize,
     /// How many copies of a repeated feature are counted.
     pub count_cap: usize,
     /// Atom with three of its neighbours (a tree, not a path).
@@ -42,10 +45,14 @@ pub struct FpKind {
 
 const fn kind(name: &'static str, max_edges: usize, count_cap: usize, branches: bool, max_cycle: usize) -> FpKind {
     let max_full_edges = if max_edges < 3 { max_edges } else { max_edges / 2 };
-    FpKind { name, max_edges, max_full_edges, count_cap, branches, max_cycle }
+    FpKind { name, max_edges, max_full_edges, long_edges: max_edges, count_cap, branches, max_cycle }
 }
 
-pub const FP_KINDS: [FpKind; 8] = [
+const fn long(kind: FpKind, name: &'static str, long_edges: usize) -> FpKind {
+    FpKind { name, long_edges, ..kind }
+}
+
+pub const FP_KINDS: [FpKind; 10] = [
     kind("atoms", 0, 4, false, 0),
     kind("paths2", 2, 4, false, 0),
     kind("paths4", 4, 4, false, 0),
@@ -54,6 +61,8 @@ pub const FP_KINDS: [FpKind; 8] = [
     kind("paths4+branches", 4, 4, true, 0),
     kind("paths4+cycles", 4, 4, false, 8),
     kind("paths4+branches+cycles", 4, 4, true, 8),
+    long(kind("", 4, 4, true, 8), "paths4+long6+branches+cycles", 6),
+    long(kind("", 4, 4, true, 8), "paths4+long8+branches+cycles", 8),
 ];
 
 pub fn fp_kind(name: &str) -> Result<FpKind, String> {
@@ -181,15 +190,19 @@ fn path_key(view: u64, atoms: &[u32], bonds: &[u32]) -> u64 {
 
 /// Collect features from a graph given as labels and adjacency.
 fn collect(kind: &FpKind, atoms: &[AtomLabels], nbrs: &[Vec<(usize, BondLabels)>], keys: &mut Vec<u64>) {
-    for (i, a) in atoms.iter().enumerate() {
+    for a in atoms {
         for (view, label) in [(1, a.z), (2, a.z_arom), (3, a.full), (4, a.z_degree), (5, a.z_h), (6, a.z_charge)] {
             if let Some(l) = label {
                 keys.push(mix(view, l as u64));
             }
         }
-        let mut path = vec![i];
-        let mut bonds = Vec::new();
+    }
+    let mut path = Vec::with_capacity(kind.max_edges.max(kind.long_edges) + 1);
+    let mut bonds = Vec::with_capacity(path.capacity());
+    for i in 0..atoms.len() {
+        path.push(i);
         extend(kind, atoms, nbrs, &mut path, &mut bonds, keys);
+        path.pop();
     }
     if kind.branches {
         branches(atoms, nbrs, keys);
@@ -208,7 +221,7 @@ fn extend(
     keys: &mut Vec<u64>,
 ) {
     let last = *path.last().unwrap();
-    if bonds.len() >= kind.max_edges {
+    if bonds.len() >= kind.max_edges.max(kind.long_edges) {
         return;
     }
     for &(next, bl) in &nbrs[last] {
@@ -232,32 +245,34 @@ fn emit_path(kind: &FpKind, atoms: &[AtomLabels], path: &[usize], bonds: &[BondL
         (11, |a| a.z, |b| b.class),
         (12, |a| a.z_arom, |b| b.exact),
     ];
-    let mut al = Vec::with_capacity(path.len());
-    let mut bl = Vec::with_capacity(bonds.len());
+    let views = if bonds.len() > kind.max_edges { &views[1..2] } else { &views[..] };
+    let mut al = [0u32; MAX_PATH_ATOMS];
+    let mut bl = [0u32; MAX_PATH_ATOMS];
     let mut run = |view: u64, af: AtomView, bf: BondView| {
-        al.clear();
-        bl.clear();
-        for &i in path {
+        for (slot, &i) in al.iter_mut().zip(path) {
             match af(&atoms[i]) {
-                Some(l) => al.push(l),
+                Some(l) => *slot = l,
                 None => return,
             }
         }
-        for b in bonds {
+        for (slot, b) in bl.iter_mut().zip(bonds) {
             match bf(b) {
-                Some(l) => bl.push(l),
+                Some(l) => *slot = l,
                 None => return,
             }
         }
-        keys.push(path_key(view, &al, &bl));
+        keys.push(path_key(view, &al[..path.len()], &bl[..bonds.len()]));
     };
-    for (view, af, bf) in views {
+    for &(view, af, bf) in views {
         run(view, af, bf);
     }
     if bonds.len() <= kind.max_full_edges {
         run(13, |a| a.full, |b| b.exact);
     }
 }
+
+/// Paths are at most `MAX_PATH_ATOMS - 1` bonds long.
+const MAX_PATH_ATOMS: usize = 16;
 
 type AtomView = fn(&AtomLabels) -> Option<u32>;
 type BondView = fn(&BondLabels) -> Option<u32>;
@@ -376,23 +391,59 @@ fn emit_cycle(atoms: &[AtomLabels], path: &[usize], bonds: &[BondLabels], keys: 
     }
 }
 
-fn finish<const W: usize>(mut keys: Vec<u64>, count_cap: usize) -> Fp<W> {
-    let bits = (W * 64) as u64;
+/// Feature IDs before folding: one per (feature, copy up to `count_cap`), sorted.
+/// Folding them gives the same bits as `fold`.
+fn feature_ids(mut keys: Vec<u64>, count_cap: usize) -> Vec<u64> {
     keys.sort_unstable();
-    let mut fp = [0u64; W];
+    let mut ids = Vec::with_capacity(keys.len());
     let mut k = 0;
     while k < keys.len() {
         let end = keys[k..].iter().position(|&x| x != keys[k]).map_or(keys.len(), |p| k + p);
-        for copy in 0..(end - k).min(count_cap) {
-            let bit = (mix(keys[k], copy as u64) % bits) as usize;
-            fp[bit / 64] |= 1 << (bit % 64);
-        }
+        ids.extend((0..(end - k).min(count_cap)).map(|copy| mix(keys[k], copy as u64)));
         k = end;
+    }
+    ids.sort_unstable();
+    ids
+}
+
+/// Fold features into `W` words: the n-th copy of a feature, for n below
+/// `count_cap`, sets bit `mix(key, n)`. Copies are counted in a small
+/// open-addressing table rather than by sorting.
+fn fold<const W: usize>(keys: &[u64], count_cap: usize) -> Fp<W> {
+    let bits = (W * 64) as u64;
+    let mut fp = [0u64; W];
+    let mut set = |id: u64| {
+        let bit = (id % bits) as usize;
+        fp[bit / 64] |= 1 << (bit % 64);
+    };
+    let size = (2 * keys.len()).next_power_of_two().max(16);
+    let mask = size - 1;
+    // (key, copies seen); keys are hashes, so their low bits index the table.
+    let mut table = vec![(0u64, 0u32); size];
+    for &k in keys {
+        let mut i = k as usize & mask;
+        loop {
+            let (tk, tc) = &mut table[i];
+            if *tc == 0 {
+                *tk = k;
+                *tc = 1;
+                set(mix(k, 0));
+                break;
+            }
+            if *tk == k {
+                if (*tc as usize) < count_cap {
+                    set(mix(k, *tc as u64));
+                    *tc += 1;
+                }
+                break;
+            }
+            i = (i + 1) & mask;
+        }
     }
     fp
 }
 
-pub fn target_fp<const W: usize>(kind: &FpKind, t: &Target) -> Fp<W> {
+fn target_keys(kind: &FpKind, t: &Target) -> Vec<u64> {
     let atoms: Vec<AtomLabels> = t.atoms.iter().map(AtomLabels::target).collect();
     let nbrs: Vec<Vec<(usize, BondLabels)>> = t
         .nbrs
@@ -401,10 +452,10 @@ pub fn target_fp<const W: usize>(kind: &FpKind, t: &Target) -> Fp<W> {
         .collect();
     let mut keys = Vec::new();
     collect(kind, &atoms, &nbrs, &mut keys);
-    finish(keys, kind.count_cap)
+    keys
 }
 
-pub fn query_fp<const W: usize>(kind: &FpKind, q: &Query) -> Fp<W> {
+fn query_keys(kind: &FpKind, q: &Query) -> Vec<u64> {
     let atoms: Vec<AtomLabels> = q.atoms.iter().map(|a| AtomLabels::query(&a.known)).collect();
     let nbrs: Vec<Vec<(usize, BondLabels)>> = q
         .nbrs
@@ -413,5 +464,21 @@ pub fn query_fp<const W: usize>(kind: &FpKind, q: &Query) -> Fp<W> {
         .collect();
     let mut keys = Vec::new();
     collect(kind, &atoms, &nbrs, &mut keys);
-    finish(keys, kind.count_cap)
+    keys
+}
+
+pub fn target_features(kind: &FpKind, t: &Target) -> Vec<u64> {
+    feature_ids(target_keys(kind, t), kind.count_cap)
+}
+
+pub fn query_features(kind: &FpKind, q: &Query) -> Vec<u64> {
+    feature_ids(query_keys(kind, q), kind.count_cap)
+}
+
+pub fn target_fp<const W: usize>(kind: &FpKind, t: &Target) -> Fp<W> {
+    fold(&target_keys(kind, t), kind.count_cap)
+}
+
+pub fn query_fp<const W: usize>(kind: &FpKind, q: &Query) -> Fp<W> {
+    fold(&query_keys(kind, q), kind.count_cap)
 }

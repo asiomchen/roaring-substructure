@@ -224,7 +224,33 @@ fn index_returns_exact_matches() {
     let index = Index::<32>::build(&kind, smarts.iter().map(|s| parse_smarts(s).unwrap()).collect());
     let t = Target::new(&parse_smiles("O=Cc1ccncc1").unwrap());
     for limit in [1, 128] {
-        let (_, found) = index.match_one(&t, &target_fp(&kind, &t), limit);
+        let found = index.match_one(&t, &target_fp(&kind, &t), limit).found;
         assert_eq!(found, vec![1, 2], "posting limit {limit}");
     }
+}
+
+#[test]
+fn compiled_atom_tests_agree_with_expressions() {
+    use crate::smarts::compile_atom;
+    let smarts = [
+        "[C&H3&D1]", "[c&H0&D2&+0]", "[#7&a]", "[#8&-]", "[N&+]", "[C,N]", "[!#6]", "[#6&!a]", "[!a]",
+        "[C,N;H1]", "[#6&H1,#7&H0]", "[C&H2&H3]", "*", "[Cl]", "[O&H1&D1&+0]",
+    ];
+    let mols = ["CC(=O)Nc1ccncc1", "C[N+](=O)[O-]", "OCl(=O)(=O)=O", "c1cc[nH]c1", "[NH4+].[Cl-]"];
+    let mut compiled = 0;
+    for s in smarts {
+        let q = parse_smarts(s).unwrap();
+        for qa in &q.atoms {
+            let Some(terms) = compile_atom(&qa.expr) else { continue };
+            compiled += 1;
+            for m in mols {
+                for t in parse_smiles(m).unwrap().target_atoms() {
+                    let p = t.packed();
+                    let fast = terms.iter().any(|&(mask, value)| p & mask == value);
+                    assert_eq!(fast, qa.expr.matches(&t), "{s} on an atom of {m}");
+                }
+            }
+        }
+    }
+    assert!(compiled >= 12, "only {compiled} atoms compiled");
 }
