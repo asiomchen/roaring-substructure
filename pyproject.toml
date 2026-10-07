@@ -16,6 +16,7 @@ dependencies = [
     "psycopg[binary]>=3.3.6",
     "pyarrow>=25.0.1",
     "pyroaring>=1.1.0",
+    "chematic-bench",
     "rdkit==2026.3.6",
     "rust-index",
     "substructure-rs",
@@ -33,3 +34,4 @@ dev = [
 [tool.uv.sources]
 rust-index = { path = "rust_index", editable = true }
 substructure-rs = { path = "substructure_rs" }
+chematic-bench = { path = "chematic_bench" }

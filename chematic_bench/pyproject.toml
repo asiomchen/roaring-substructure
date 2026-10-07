@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "chematic-bench"
+version = "0.1.0"
+description = "Substructure search with the chematic crates (benchmark 10)"
+requires-python = ">=3.13"
+
+# `chematic_bench [options]` runs the same command line as the Rust binary.
+[project.scripts]
+chematic_bench = "chematic_bench:main"
+
+[tool.maturin]
+features = ["python"]
+
+# Rebuild on `uv sync` / `uv run` whenever the Rust sources change, here or in
+# substructure_rs, whose screen the `screened` mode uses.
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }, { file = "src/**/*.rs" }, { file = "pyo3-config.txt" }, { file = "../substructure_rs/src/**/*.rs" }, { file = "../substructure_rs/Cargo.toml" }]
