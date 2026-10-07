@@ -71,6 +71,15 @@ class SubstructureRsTest(unittest.TestCase):
                 self.assertEqual(report["fp_bits"], bits)
                 self.assertEqual(report["digest"], digest, f"{kind} {bits}")
 
+    def test_atom_orders_agree(self):
+        digest = self.run_fn(runs=1)["digest"]
+        for order in substructure_rs.ORDERS:
+            report = self.run_fn(runs=1, order=order)
+            self.assertEqual(report["order"], order)
+            self.assertEqual(report["digest"], digest, order)
+        with self.assertRaises(ValueError):
+            self.run_fn(order="random")
+
     def test_bad_fingerprint_raises_value_error(self):
         with self.assertRaises(ValueError):
             self.run_fn(fp_kind="ecfp4")

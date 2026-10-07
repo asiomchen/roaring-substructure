@@ -1,4 +1,5 @@
 //! Why do screened pairs fail to match? (`--analyze-false-positives`)
+//! How much searching does exact matching do? (`--search-stats`)
 //!
 //! For every pair that passes the fingerprint screen but not the exact match,
 //! loosen one kind of query constraint at a time and match again. A pair that
@@ -8,7 +9,8 @@
 //! Author: Marcin Kowiel + Claude
 
 use crate::fingerprint::{query_features, target_features, FpKind};
-use crate::matcher::{has_match, Plan, Target};
+use crate::index::Index;
+use crate::matcher::{has_match, has_match_counted, Plan, SearchCounts, Target};
 use crate::smarts::{BondQuery, Expr, Prim, Query};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -209,6 +211,95 @@ pub fn false_positives(
         top(10),
         top(100),
         top(1000)
+    );
+    out
+}
+
+/// Search work over every screened pair, split by whether the pair matches.
+pub fn search_stats<const W: usize>(
+    index: &Index<W>,
+    targets: &[Target],
+    candidates: &[Vec<u32>],
+    found: &[Vec<u32>],
+) -> String {
+    // (matched, query size, counts) per screened pair.
+    let pairs: Vec<(bool, usize, SearchCounts)> = candidates
+        .par_iter()
+        .zip(found)
+        .zip(targets)
+        .flat_map_iter(|((cands, found), t)| {
+            cands.iter().map(move |&q| {
+                let mut c = SearchCounts::default();
+                let plan = index.plan(q);
+                let hit = has_match_counted(&index.queries[q as usize], plan, t, &mut c);
+                debug_assert_eq!(hit, found.binary_search(&q).is_ok());
+                (hit, plan.len(), c)
+            })
+        })
+        .collect();
+
+    let mut out = String::new();
+    let _ = writeln!(out, "search stats    per screened pair: target atoms offered (root scan), atoms placed");
+    for (label, hit) in [("matches", true), ("non-matches", false)] {
+        let sel: Vec<&(bool, usize, SearchCounts)> = pairs.iter().filter(|p| p.0 == hit).collect();
+        let n = sel.len().max(1) as f64;
+        let mean = |f: &dyn Fn(&SearchCounts) -> u64| sel.iter().map(|p| f(&p.2)).sum::<u64>() as f64 / n;
+        let mut placed: Vec<u64> = sel.iter().map(|p| p.2.placed).collect();
+        placed.sort_unstable();
+        let pct = |q: f64| placed.get(((placed.len() as f64 - 1.0) * q) as usize).copied().unwrap_or(0);
+        let size = sel.iter().map(|p| p.1).sum::<usize>() as f64 / n;
+        let _ = writeln!(
+            out,
+            "  {label:<12} {:>7} pairs, {size:>4.1} query atoms: offered {:>6.1} ({:>5.1} root), \
+placed {:>6.1} (median {}, p99 {}, max {})",
+            sel.len(),
+            mean(&|c| c.offered),
+            mean(&|c| c.root_offered),
+            mean(&|c| c.placed),
+            pct(0.5),
+            pct(0.99),
+            placed.last().copied().unwrap_or(0)
+        );
+    }
+    // The same pairs, timed on one thread in two orders: reactant by reactant
+    // (as the benchmark runs) and query by query (each plan read once, hot).
+    let mut by_reactant: Vec<(u32, u32)> = candidates
+        .iter()
+        .enumerate()
+        .flat_map(|(r, c)| c.iter().map(move |&q| (r as u32, q)))
+        .collect();
+    let time = |pairs: &[(u32, u32)]| {
+        let start = std::time::Instant::now();
+        let hits = pairs
+            .iter()
+            .filter(|&&(r, q)| has_match(&index.queries[q as usize], index.plan(q), &targets[r as usize]))
+            .count();
+        (start.elapsed().as_secs_f64(), hits)
+    };
+    let (t_reactant, h1) = time(&by_reactant);
+    by_reactant.sort_unstable_by_key(|&(r, q)| (q, r));
+    let (t_query, h2) = time(&by_reactant);
+    assert_eq!(h1, h2);
+    let _ = writeln!(
+        out,
+        "  one thread, {} pairs: reactant by reactant {:.1} ms ({:.0} ns/pair), query by query {:.1} ms ({:.0} ns/pair)",
+        by_reactant.len(),
+        1000.0 * t_reactant,
+        1e9 * t_reactant / by_reactant.len().max(1) as f64,
+        1000.0 * t_query,
+        1e9 * t_query / by_reactant.len().max(1) as f64
+    );
+    let misses: Vec<&(bool, usize, SearchCounts)> = pairs.iter().filter(|p| !p.0).collect();
+    let n = misses.len().max(1) as f64;
+    let share = |f: &dyn Fn(usize, usize) -> bool| {
+        100.0 * misses.iter().filter(|p| f(p.2.depth, p.1)).count() as f64 / n
+    };
+    let _ = writeln!(
+        out,
+        "  non-matches fail with the root unplaced {:.1}%, under half placed {:.1}%, half or more {:.1}%",
+        share(&|d, _| d == 0),
+        share(&|d, s| d > 0 && 2 * d < s),
+        share(&|d, s| d > 0 && 2 * d >= s)
     );
     out
 }

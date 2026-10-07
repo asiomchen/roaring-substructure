@@ -29,10 +29,15 @@ over threads.
     uv run benchmarks/09_rust_native_fp.py
     uv run benchmarks/09_rust_native_fp.py --kinds paths4 paths4+cycles --bits 2048 8192
     uv run benchmarks/09_rust_native_fp.py --postings 64 128 256 --csv out.csv
+    uv run benchmarks/09_rust_native_fp.py --orders rare-root score rare
+
+`--orders` sets the atom order of exact matching (`rare-root` by default:
+start from the query atom whose label is rarest).
 """
 
 import argparse
 import csv
+import itertools
 from pathlib import Path
 
 import substructure_rs
@@ -41,6 +46,7 @@ COLUMNS = [
     "fp_kind",
     "fp_bits",
     "postings",
+    "order",
     "query_density",
     "target_density",
     "build_seconds",
@@ -76,6 +82,9 @@ def main() -> None:
         "--bits", nargs="+", type=int, default=[512, 1024, 2048, 4096, 8192], metavar="N"
     )
     parser.add_argument("--postings", nargs="+", type=int, default=[128], metavar="N")
+    parser.add_argument(
+        "--orders", nargs="+", default=["rare-root"], choices=substructure_rs.ORDERS
+    )
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--threads", type=int, default=0, help="0 = all cores")
     parser.add_argument("--reference", type=Path)
@@ -91,7 +100,7 @@ def main() -> None:
 
     rows = []
     header = (
-        f"{'kind':<24}{'bits':>6}{'post':>5}{'q set':>7}{'r set':>7}"
+        f"{'kind':<24}{'bits':>6}{'post':>5}{'order':>10}{'q set':>7}{'r set':>7}"
         f"{'build s':>9}{'MiB':>7}{'posted':>10}{'candidates':>12}{'matches':>9}"
         f"{'match ms':>10} |{'fp':>6}{'post':>6}{'check':>6}{'exact':>6}"
     )
@@ -99,7 +108,7 @@ def main() -> None:
     print("-" * len(header))
     for kind in args.kinds:
         for bits in args.bits:
-            for postings in args.postings:
+            for postings, order in itertools.product(args.postings, args.orders):
                 try:
                     r = substructure_rs.run(
                         queries_file=args.queries_file,
@@ -109,6 +118,7 @@ def main() -> None:
                         threads=args.threads,
                         fp_kind=kind,
                         fp_bits=bits,
+                        order=order,
                         reference=args.reference,
                     )
                 except ValueError as error:
@@ -117,6 +127,7 @@ def main() -> None:
                     "fp_kind": kind,
                     "fp_bits": bits,
                     "postings": postings,
+                    "order": order,
                     "query_density": r["query_density"],
                     "target_density": r["target_density"],
                     "build_seconds": r["build_seconds"],
@@ -131,7 +142,7 @@ def main() -> None:
                 }
                 rows.append(row)
                 print(
-                    f"{kind:<24}{bits:>6}{postings:>5}"
+                    f"{kind:<24}{bits:>6}{postings:>5}{order:>10}"
                     f"{100 * row['query_density']:>6.1f}%{100 * row['target_density']:>6.1f}%"
                     f"{row['build_seconds']:>9.3f}{row['index_mib']:>7.1f}"
                     f"{row['posted']:>10}{row['candidates']:>12}{row['matches']:>9}"

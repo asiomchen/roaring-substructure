@@ -170,6 +170,32 @@ results:
 The posting count is not a lever: 128 is best or tied at every size, since 64 leaves more
 for the fingerprint check and 256 costs more in the filter than it saves.
 
+**Exact-match search order.** `--search-stats` counts the search work per screened pair
+and times the same pairs reactant by reactant and query by query. The search was
+already close to minimal: a matching pair places 10 reactant atoms for a 7-atom query,
+a non-matching one 12–14. Timing the pairs query by query (each plan read hot) saved
+only 4%, so the cost was the work itself, mostly the scan for the first atom, which
+offered all ~30 reactant atoms to the full per-atom check. Three changes, all with
+identical results, took the one-thread exact-match timer from 282 to about 190 ns per
+pair:
+
+- the root scan is a tight `packed & mask == value` pass, and only hits go further
+  (282 → 248 ns);
+- each search step's test, anchor bond and ring closures sit in one struct instead of
+  three vectors (→ 223 ns);
+- `--order rare-root`, now the default, starts from the query atom whose label is rarest,
+  estimated from the fully specified atoms of the query set itself (→ about 190 ns). The
+  old order is `--order score`; `--order rare` also grows by rarity, which is no better.
+
+| kind, 2048 bits | exact ms `score` | `rare-root` | `rare` | total ms `rare-root` |
+|---|---:|---:|---:|---:|
+| `paths4` | 25.0 | 22.0 | 23.3 | 56.9 |
+| `paths4+branches` | 19.7 | 17.0 | 18.7 | **52.5** |
+| `paths4+branches+cycles` | 18.0 | 15.0 | 16.0 | 54.0 |
+
+(one thread, mean of three sweeps; the main table above predates these changes, which
+lower every row's exact-match time.)
+
 **Why screened pairs fail.** `--analyze-false-positives` takes each pair that passes the
 screen but not the exact match, drops one kind of query constraint at a time, and
 matches again. For `paths4+branches+cycles` at 2048 bits (44,754 false positives):

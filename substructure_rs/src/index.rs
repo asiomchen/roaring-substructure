@@ -3,7 +3,7 @@
 //! Author: Marcin Kowiel + Claude
 
 use crate::fingerprint::{query_fp, Fp, FpKind};
-use crate::matcher::{has_match, Plan, Target};
+use crate::matcher::{has_match, LabelFreq, Order, Plan, Target};
 use crate::smarts::Query;
 use rayon::prelude::*;
 use std::time::Instant;
@@ -23,11 +23,12 @@ pub struct Index<const W: usize> {
 impl<const W: usize> Index<W> {
     const BITS: usize = 64 * W;
 
-    pub fn build(kind: &FpKind, queries: Vec<Query>) -> Self {
+    pub fn build(kind: &FpKind, order: Order, queries: Vec<Query>) -> Self {
         let n = queries.len();
         let words = n.div_ceil(64);
+        let freq = LabelFreq::new(&queries);
         let (fps, plans): (Vec<Fp<W>>, Vec<Plan>) =
-            queries.par_iter().map(|q| (query_fp(kind, q), Plan::new(q))).unzip();
+            queries.par_iter().map(|q| (query_fp(kind, q), Plan::with_order(q, order, &freq))).unzip();
         let mut postings = vec![0u64; Self::BITS * words];
         let mut counts = vec![0usize; Self::BITS];
         for (idx, fp) in fps.iter().enumerate() {
@@ -52,6 +53,10 @@ impl<const W: usize> Index<W> {
 
     pub fn nbytes(&self) -> usize {
         8 * (self.fps.len() * W + self.postings.len() + self.all_ids.len())
+    }
+
+    pub fn plan(&self, q: u32) -> &Plan {
+        &self.plans[q as usize]
     }
 
     /// Mean fraction of bits set in the query fingerprints.

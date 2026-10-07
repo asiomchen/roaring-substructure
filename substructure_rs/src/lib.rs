@@ -39,10 +39,12 @@ use std::time::Instant;
 
 pub const USAGE: &str = "usage: substructure_rs [--queries-file F] [--reactants-file F] [--postings N] \
 [--runs N] [--threads N] [--fp-kind K] [--fp-bits N] [--reference pairs.bin] [--dump-atoms out.txt]\n\
-[--analyze-false-positives]\n\
+[--analyze-false-positives] [--order O] [--search-stats]\n\
 Files may be .parquet or .csv; queries use column `substructure`, reactants `smiles`.\n\
 --fp-kind: atoms, paths2, paths4 (default), paths4-nocount, paths6, paths4+branches,\n\
-paths4+cycles, paths4+branches+cycles. --fp-bits: 512, 1024, 2048, 4096 (default), 8192, 16384.";
+paths4+cycles, paths4+branches+cycles, paths4+long6+branches+cycles,\n\
+paths4+long8+branches+cycles. --order (exact-match atom order): rare-root (default), score, rare.\n\
+--search-stats reports how much searching exact matching does. --fp-bits: 512, 1024, 2048, 4096 (default), 8192, 16384.";
 
 /// Benchmark settings; `Options::default()` matches the command-line defaults.
 #[derive(Clone, Debug)]
@@ -63,6 +65,10 @@ pub struct Options {
     pub dump_atoms: Option<PathBuf>,
     /// Report why screened pairs fail the exact match (see `analysis.rs`).
     pub analyze: bool,
+    /// Exact-match atom order, a name from `matcher::ORDERS`.
+    pub order: String,
+    /// Report search work in exact matching (see `analysis.rs`).
+    pub search_stats: bool,
 }
 
 impl Default for Options {
@@ -78,6 +84,8 @@ impl Default for Options {
             reference: None,
             dump_atoms: None,
             analyze: false,
+            order: matcher::DEFAULT_ORDER.into(),
+            search_stats: false,
         }
     }
 }
@@ -85,6 +93,7 @@ impl Default for Options {
 impl Options {
     pub fn validate(&self) -> Result<(), String> {
         fp_kind(&self.fp_kind)?;
+        matcher::order(&self.order)?;
         fingerprint::check_fp_bits(self.fp_bits)?;
         if !(1..=self.fp_bits).contains(&self.postings) {
             return Err(format!("postings must be between 1 and {}", self.fp_bits));
@@ -114,6 +123,7 @@ pub struct Report {
     pub threads: usize,
     pub fp_kind: String,
     pub fp_bits: usize,
+    pub order: String,
     pub read_seconds: f64,
     pub parse_queries_seconds: f64,
     pub parse_reactants_seconds: f64,
@@ -163,6 +173,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Option<Opti
             "--reference" => opts.reference = Some(value()?.into()),
             "--dump-atoms" => opts.dump_atoms = Some(value()?.into()),
             "--analyze-false-positives" => opts.analyze = true,
+            "--order" => opts.order = value()?,
+            "--search-stats" => opts.search_stats = true,
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -364,6 +376,7 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
         threads: rayon::current_num_threads(),
         fp_kind: opts.fp_kind.clone(),
         fp_bits: opts.fp_bits,
+        order: opts.order.clone(),
         read_seconds,
         parse_queries_seconds,
         parse_reactants_seconds,
@@ -396,7 +409,7 @@ struct Screened {
 
 fn screen_and_match<const W: usize>(kind: &FpKind, queries: Vec<Query>, targets: &[Target], opts: &Options) -> Screened {
     let start = Instant::now();
-    let index = Index::<W>::build(kind, queries);
+    let index = Index::<W>::build(kind, matcher::order(&opts.order).expect("validated"), queries);
     let build_seconds = start.elapsed().as_secs_f64();
 
     let mut match_seconds = Vec::new();
@@ -424,8 +437,11 @@ fn screen_and_match<const W: usize>(kind: &FpKind, queries: Vec<Query>, targets:
     }
 
     let per: Vec<Matched> = result.expect("at least one run");
-    let analysis = opts.analyze.then(|| {
-        let candidates: Vec<Vec<u32>> = targets
+    let need_candidates = opts.analyze || opts.search_stats;
+    let candidates: Vec<Vec<u32>> = if !need_candidates {
+        Vec::new()
+    } else {
+        targets
             .par_iter()
             .map(|t| {
                 let fp = target_fp::<W>(kind, t);
@@ -433,10 +449,17 @@ fn screen_and_match<const W: usize>(kind: &FpKind, queries: Vec<Query>, targets:
                 index.subset_filter(&fp, &index.posting_filter(&fp, opts.postings), &mut out);
                 out
             })
-            .collect();
-        let found: Vec<Vec<u32>> = per.iter().map(|m| m.found.clone()).collect();
-        analysis::false_positives(kind, &index.queries, targets, &candidates, &found)
-    });
+            .collect()
+    };
+    let found: Vec<Vec<u32>> = per.iter().map(|m| m.found.clone()).collect();
+    let mut analysis = String::new();
+    if opts.analyze {
+        analysis += &analysis::false_positives(kind, &index.queries, targets, &candidates, &found);
+    }
+    if opts.search_stats {
+        analysis += &analysis::search_stats(&index, targets, &candidates, &found);
+    }
+    let analysis = (!analysis.is_empty()).then_some(analysis);
 
     let target_ones: u64 = targets
         .par_iter()
@@ -463,6 +486,7 @@ pub fn print_report(r: &Report) {
         r.match_seconds.len(),
         r.threads
     );
+    println!("atom order      {}", r.order);
     println!(
         "fingerprint     {} at {} bits; {:.1}% of bits set in queries, {:.1}% in reactants",
         r.fp_kind,

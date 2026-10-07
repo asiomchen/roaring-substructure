@@ -221,7 +221,7 @@ fn cycles_and_branches_screen_out_non_matches() {
 fn index_returns_exact_matches() {
     let smarts = ["c1ccccc1", "C=O", "[#7&a]", "C#N", "[O&-]"];
     let kind = fp_kind("paths4").unwrap();
-    let index = Index::<32>::build(&kind, smarts.iter().map(|s| parse_smarts(s).unwrap()).collect());
+    let index = Index::<32>::build(&kind, crate::matcher::Order::RareRoot, smarts.iter().map(|s| parse_smarts(s).unwrap()).collect());
     let t = Target::new(&parse_smiles("O=Cc1ccncc1").unwrap());
     for limit in [1, 128] {
         let found = index.match_one(&t, &target_fp(&kind, &t), limit).found;
@@ -253,4 +253,25 @@ fn compiled_atom_tests_agree_with_expressions() {
         }
     }
     assert!(compiled >= 12, "only {compiled} atoms compiled");
+}
+
+#[test]
+fn every_atom_order_finds_the_same_matches() {
+    use crate::matcher::{LabelFreq, ORDERS};
+    let smarts = [
+        "c1ccccc1", "[C&H3&D1]-[C&H0&D3&+0](=[O&H0&D1&+0])-O", "[#7&a]:c", "C~O", "[C,N]=O", "O=C-[#7]",
+        "[#8]-c1:c:[c&H1&D2&+0]:c:[c&H0&D2&+0]#[c&H0&D2&+0]:1", "c1ccccc1.O", "[!#6]", "CC(C)C",
+    ];
+    let queries: Vec<_> = smarts.iter().map(|s| parse_smarts(s).unwrap()).collect();
+    let freq = LabelFreq::new(&queries);
+    let targets = ["COc1c#cccc1", "CC(=O)Nc1ccncc1", "CC(=O)OC", "c1ccccc1-c1ccccc1", "CN=O", "c1ccccc1O", "CC(C)CC"];
+    for s in targets {
+        let t = Target::new(&parse_smiles(s).unwrap());
+        for q in &queries {
+            let want = has_match(q, &Plan::new(q), &t);
+            for &(name, order) in &ORDERS {
+                assert_eq!(has_match(q, &Plan::with_order(q, order, &freq), &t), want, "{name} {s}");
+            }
+        }
+    }
 }
