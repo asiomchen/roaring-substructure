@@ -170,26 +170,67 @@ fn mix(mut h: u64, v: u64) -> u64 {
     (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb)
 }
 
-/// Hash a label sequence independent of direction.
-fn path_key(view: u64, atoms: &[u32], bonds: &[u32]) -> u64 {
-    let fwd = atoms.iter().copied().zip(bonds.iter().copied().chain([0]));
-    let rev = atoms.iter().rev().copied().zip(bonds.iter().rev().copied().chain([0]));
-    let forward_smaller = fwd.clone().cmp(rev.clone()) != std::cmp::Ordering::Greater;
-    let mut h = mix(view, atoms.len() as u64);
-    if forward_smaller {
-        for (a, b) in fwd {
-            h = mix(mix(h, a as u64), b as u64);
-        }
-    } else {
-        for (a, b) in rev {
-            h = mix(mix(h, a as u64), b as u64);
+/// Adjacency in one flat list: atom `i`'s neighbours are `edges[start[i]..start[i + 1]]`.
+#[derive(Default)]
+struct Nbrs {
+    start: Vec<usize>,
+    edges: Vec<(usize, BondLabels)>,
+}
+
+impl Nbrs {
+    /// Refill from per-atom neighbour lists.
+    fn fill<'a, I, J>(&mut self, lists: I)
+    where
+        I: IntoIterator<Item = J>,
+        J: IntoIterator<Item = (usize, BondLabels)>,
+    {
+        self.start.clear();
+        self.edges.clear();
+        self.start.push(0);
+        for ns in lists {
+            self.edges.extend(ns);
+            self.start.push(self.edges.len());
         }
     }
-    h
+
+    fn len(&self) -> usize {
+        self.start.len() - 1
+    }
+}
+
+impl std::ops::Index<usize> for Nbrs {
+    type Output = [(usize, BondLabels)];
+
+    #[inline]
+    fn index(&self, i: usize) -> &Self::Output {
+        &self.edges[self.start[i]..self.start[i + 1]]
+    }
+}
+
+/// Buffers reused from one molecule to the next on each thread.
+#[derive(Default)]
+struct Scratch {
+    atoms: Vec<AtomLabels>,
+    nbrs: Nbrs,
+    keys: Vec<u64>,
+    table: Vec<(u64, u32)>,
+    path: Vec<usize>,
+    bonds: Vec<BondLabels>,
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
 }
 
 /// Collect features from a graph given as labels and adjacency.
-fn collect(kind: &FpKind, atoms: &[AtomLabels], nbrs: &[Vec<(usize, BondLabels)>], keys: &mut Vec<u64>) {
+fn collect(
+    kind: &FpKind,
+    atoms: &[AtomLabels],
+    nbrs: &Nbrs,
+    keys: &mut Vec<u64>,
+    path: &mut Vec<usize>,
+    bonds: &mut Vec<BondLabels>,
+) {
     for a in atoms {
         for (view, label) in [(1, a.z), (2, a.z_arom), (3, a.full), (4, a.z_degree), (5, a.z_h), (6, a.z_charge)] {
             if let Some(l) = label {
@@ -197,77 +238,96 @@ fn collect(kind: &FpKind, atoms: &[AtomLabels], nbrs: &[Vec<(usize, BondLabels)>
             }
         }
     }
-    let mut path = Vec::with_capacity(kind.max_edges.max(kind.long_edges) + 1);
-    let mut bonds = Vec::with_capacity(path.capacity());
+    path.clear();
     for i in 0..atoms.len() {
-        path.push(i);
-        extend(kind, atoms, nbrs, &mut path, &mut bonds, keys);
-        path.pop();
+        paths_from(kind, atoms, nbrs, i, path, keys);
     }
     if kind.branches {
         branches(atoms, nbrs, keys);
     }
     if kind.max_cycle >= 3 {
-        cycles(kind.max_cycle, atoms, nbrs, keys);
+        cycles(kind.max_cycle, atoms, nbrs, keys, path, bonds);
     }
 }
 
-fn extend(
-    kind: &FpKind,
-    atoms: &[AtomLabels],
-    nbrs: &[Vec<(usize, BondLabels)>],
-    path: &mut Vec<usize>,
-    bonds: &mut Vec<BondLabels>,
-    keys: &mut Vec<u64>,
-) {
-    let last = *path.last().unwrap();
-    if bonds.len() >= kind.max_edges.max(kind.long_edges) {
+/// Path labellings: (view, atom label, bond label). Paths longer than
+/// `max_edges` use only the second; the last only up to `max_full_edges`.
+const PATH_VIEWS: [(u64, AtomView, BondView); 4] = [
+    (10, |a| a.z, |_| Some(0)),
+    (11, |a| a.z, |b| b.class),
+    (12, |a| a.z_arom, |b| b.exact),
+    (13, |a| a.full, |b| b.exact),
+];
+
+/// Odd multiplier of the polynomial path hashes.
+const K: u64 = 0x9e37_79b9_7f4a_7c15;
+
+#[inline]
+fn atom_token(l: u32) -> u64 {
+    mix(0xa70, l as u64)
+}
+
+#[inline]
+fn bond_token(l: u32) -> u64 {
+    mix(0xb0d, l as u64)
+}
+
+/// Per path labelling, polynomial hashes of the label sequence read forward
+/// and backward, or `None` once a label is open. A path and its reverse swap
+/// the two, so the smaller one keys the path in either direction; both
+/// extend in constant time as the path grows.
+type Runs = [Option<(u64, u64)>; 4];
+
+fn paths_from(kind: &FpKind, atoms: &[AtomLabels], nbrs: &Nbrs, start: usize, path: &mut Vec<usize>, keys: &mut Vec<u64>) {
+    let mut runs: Runs = [None; 4];
+    for (run, &(_, af, _)) in runs.iter_mut().zip(&PATH_VIEWS) {
+        *run = af(&atoms[start]).map(|l| (atom_token(l), atom_token(l)));
+    }
+    path.push(start);
+    // `pow` = K^(labels so far): one atom.
+    extend(kind, atoms, nbrs, path, runs, K, keys);
+    path.pop();
+}
+
+fn extend(kind: &FpKind, atoms: &[AtomLabels], nbrs: &Nbrs, path: &mut Vec<usize>, runs: Runs, pow: u64, keys: &mut Vec<u64>) {
+    // Bonds in the extended path.
+    let edges = path.len();
+    if edges > kind.max_edges.max(kind.long_edges) {
         return;
     }
+    let wanted = [edges <= kind.max_edges, true, edges <= kind.max_edges, edges <= kind.max_full_edges];
+    let last = *path.last().unwrap();
     for &(next, bl) in &nbrs[last] {
         if path.contains(&next) {
             continue;
         }
-        path.push(next);
-        bonds.push(bl);
+        let mut next_runs: Runs = [None; 4];
+        let mut any = false;
+        for v in 0..PATH_VIEWS.len() {
+            let (Some((f, r)), true) = (runs[v], wanted[v]) else { continue };
+            let (_, af, bf) = PATH_VIEWS[v];
+            if let (Some(b), Some(a)) = (bf(&bl), af(&atoms[next])) {
+                let (tb, ta) = (bond_token(b), atom_token(a));
+                let f = f.wrapping_mul(K).wrapping_add(tb).wrapping_mul(K).wrapping_add(ta);
+                let r = r.wrapping_add(tb.wrapping_mul(pow)).wrapping_add(ta.wrapping_mul(pow.wrapping_mul(K)));
+                next_runs[v] = Some((f, r));
+                any = true;
+            }
+        }
+        // Open labels stay open, so no longer path can emit anything either.
+        if !any {
+            continue;
+        }
         if path[0] < next {
-            emit_path(kind, atoms, path, bonds, keys);
+            for (v, &run) in next_runs.iter().enumerate() {
+                if let Some((f, r)) = run {
+                    keys.push(mix(mix(PATH_VIEWS[v].0, edges as u64), f.min(r)));
+                }
+            }
         }
-        extend(kind, atoms, nbrs, path, bonds, keys);
+        path.push(next);
+        extend(kind, atoms, nbrs, path, next_runs, pow.wrapping_mul(K).wrapping_mul(K), keys);
         path.pop();
-        bonds.pop();
-    }
-}
-
-fn emit_path(kind: &FpKind, atoms: &[AtomLabels], path: &[usize], bonds: &[BondLabels], keys: &mut Vec<u64>) {
-    let views: [(u64, AtomView, BondView); 3] = [
-        (10, |a| a.z, |_| Some(0)),
-        (11, |a| a.z, |b| b.class),
-        (12, |a| a.z_arom, |b| b.exact),
-    ];
-    let views = if bonds.len() > kind.max_edges { &views[1..2] } else { &views[..] };
-    let mut al = [0u32; MAX_PATH_ATOMS];
-    let mut bl = [0u32; MAX_PATH_ATOMS];
-    let mut run = |view: u64, af: AtomView, bf: BondView| {
-        for (slot, &i) in al.iter_mut().zip(path) {
-            match af(&atoms[i]) {
-                Some(l) => *slot = l,
-                None => return,
-            }
-        }
-        for (slot, b) in bl.iter_mut().zip(bonds) {
-            match bf(b) {
-                Some(l) => *slot = l,
-                None => return,
-            }
-        }
-        keys.push(path_key(view, &al[..path.len()], &bl[..bonds.len()]));
-    };
-    for &(view, af, bf) in views {
-        run(view, af, bf);
-    }
-    if bonds.len() <= kind.max_full_edges {
-        run(13, |a| a.full, |b| b.exact);
     }
 }
 
@@ -279,13 +339,14 @@ type BondView = fn(&BondLabels) -> Option<u32>;
 
 /// Each atom with every three of its neighbours: the centre label and the
 /// sorted (bond, atom) labels of the arms.
-fn branches(atoms: &[AtomLabels], nbrs: &[Vec<(usize, BondLabels)>], keys: &mut Vec<u64>) {
+fn branches(atoms: &[AtomLabels], nbrs: &Nbrs, keys: &mut Vec<u64>) {
     let views: [(u64, AtomView, BondView); 3] = [
         (20, |a| a.z, |b| b.class),
         (21, |a| a.z_arom, |b| b.exact),
         (22, |a| a.full, |b| b.exact),
     ];
-    for (c, ns) in nbrs.iter().enumerate() {
+    for c in 0..nbrs.len() {
+        let ns = &nbrs[c];
         for i in 0..ns.len() {
             for j in i + 1..ns.len() {
                 for k in j + 1..ns.len() {
@@ -313,11 +374,18 @@ fn branches(atoms: &[AtomLabels], nbrs: &[Vec<(usize, BondLabels)>], keys: &mut 
 
 /// Simple cycles of 3..=`max_len` atoms, each found once: from its lowest
 /// atom, in the direction whose second atom is lower than its last.
-fn cycles(max_len: usize, atoms: &[AtomLabels], nbrs: &[Vec<(usize, BondLabels)>], keys: &mut Vec<u64>) {
+fn cycles(
+    max_len: usize,
+    atoms: &[AtomLabels],
+    nbrs: &Nbrs,
+    keys: &mut Vec<u64>,
+    path: &mut Vec<usize>,
+    bonds: &mut Vec<BondLabels>,
+) {
     fn walk(
         max_len: usize,
         atoms: &[AtomLabels],
-        nbrs: &[Vec<(usize, BondLabels)>],
+        nbrs: &Nbrs,
         path: &mut Vec<usize>,
         bonds: &mut Vec<BondLabels>,
         keys: &mut Vec<u64>,
@@ -339,11 +407,11 @@ fn cycles(max_len: usize, atoms: &[AtomLabels], nbrs: &[Vec<(usize, BondLabels)>
             }
         }
     }
-    let mut path = Vec::with_capacity(max_len);
-    let mut bonds = Vec::with_capacity(max_len);
+    path.clear();
+    bonds.clear();
     for s in 0..atoms.len() {
         path.push(s);
-        walk(max_len, atoms, nbrs, &mut path, &mut bonds, keys);
+        walk(max_len, atoms, nbrs, path, bonds, keys);
         path.pop();
     }
 }
@@ -356,12 +424,11 @@ fn emit_cycle(atoms: &[AtomLabels], path: &[usize], bonds: &[BondLabels], keys: 
         (32, |a| a.z_arom, |b| b.exact),
     ];
     let n = path.len();
-    let mut seq = Vec::with_capacity(n);
+    let mut seq = [(0u32, 0u32); MAX_PATH_ATOMS];
     'view: for (view, af, bf) in views {
-        seq.clear();
-        for (&i, b) in path.iter().zip(bonds) {
+        for ((slot, &i), b) in seq.iter_mut().zip(path).zip(bonds) {
             match (af(&atoms[i]), bf(b)) {
-                (Some(a), Some(b)) => seq.push((a, b)),
+                (Some(a), Some(b)) => *slot = (a, b),
                 _ => continue 'view,
             }
         }
@@ -372,19 +439,23 @@ fn emit_cycle(atoms: &[AtomLabels], path: &[usize], bonds: &[BondLabels], keys: 
             let a = (r + n - i) % n;
             (seq[a].0, seq[(a + n - 1) % n].1)
         };
-        let mut best: Vec<(u32, u32)> = (0..n).map(|i| forward(0, i)).collect();
-        let mut cand = Vec::with_capacity(n);
+        let mut best = [(0u32, 0u32); MAX_PATH_ATOMS];
+        let mut cand = [(0u32, 0u32); MAX_PATH_ATOMS];
+        for (i, slot) in best[..n].iter_mut().enumerate() {
+            *slot = forward(0, i);
+        }
         for r in 0..n {
             for dir in [0, 1] {
-                cand.clear();
-                cand.extend((0..n).map(|i| if dir == 0 { forward(r, i) } else { backward(r, i) }));
-                if cand < best {
-                    std::mem::swap(&mut cand, &mut best);
+                for (i, slot) in cand[..n].iter_mut().enumerate() {
+                    *slot = if dir == 0 { forward(r, i) } else { backward(r, i) };
+                }
+                if cand[..n] < best[..n] {
+                    best = cand;
                 }
             }
         }
         let mut h = mix(view, n as u64);
-        for (a, b) in best {
+        for &(a, b) in &best[..n] {
             h = mix(mix(h, a as u64), b as u64);
         }
         keys.push(h);
@@ -409,7 +480,7 @@ fn feature_ids(mut keys: Vec<u64>, count_cap: usize) -> Vec<u64> {
 /// Fold features into `W` words: the n-th copy of a feature, for n below
 /// `count_cap`, sets bit `mix(key, n)`. Copies are counted in a small
 /// open-addressing table rather than by sorting.
-fn fold<const W: usize>(keys: &[u64], count_cap: usize) -> Fp<W> {
+fn fold<const W: usize>(keys: &[u64], count_cap: usize, table: &mut Vec<(u64, u32)>) -> Fp<W> {
     let bits = (W * 64) as u64;
     let mut fp = [0u64; W];
     let mut set = |id: u64| {
@@ -419,7 +490,8 @@ fn fold<const W: usize>(keys: &[u64], count_cap: usize) -> Fp<W> {
     let size = (2 * keys.len()).next_power_of_two().max(16);
     let mask = size - 1;
     // (key, copies seen); keys are hashes, so their low bits index the table.
-    let mut table = vec![(0u64, 0u32); size];
+    table.clear();
+    table.resize(size, (0, 0));
     for &k in keys {
         let mut i = k as usize & mask;
         loop {
@@ -443,28 +515,50 @@ fn fold<const W: usize>(keys: &[u64], count_cap: usize) -> Fp<W> {
     fp
 }
 
+impl Scratch {
+    fn load_target(&mut self, t: &Target) {
+        self.atoms.clear();
+        self.atoms.extend(t.atoms.iter().map(AtomLabels::target));
+        self.nbrs.fill(t.nbrs.iter().map(|ns| ns.iter().map(|&(n, k)| (n as usize, BondLabels::target(k)))));
+    }
+
+    fn load_query(&mut self, q: &Query) {
+        self.atoms.clear();
+        self.atoms.extend(q.atoms.iter().map(|a| AtomLabels::query(&a.known)));
+        self.nbrs.fill(q.nbrs.iter().map(|ns| ns.iter().map(|&(n, b)| (n, BondLabels::query(q.bonds[b].query)))));
+    }
+
+    /// Features of the loaded molecule into `self.keys`.
+    fn collect(&mut self, kind: &FpKind) {
+        self.keys.clear();
+        let Scratch { atoms, nbrs, keys, path, bonds, .. } = self;
+        collect(kind, atoms, nbrs, keys, path, bonds);
+    }
+
+    fn fold<const W: usize>(&mut self, kind: &FpKind) -> Fp<W> {
+        fold(&self.keys, kind.count_cap, &mut self.table)
+    }
+}
+
+/// Run `f` with this thread's scratch buffers.
+fn with_scratch<R>(f: impl FnOnce(&mut Scratch) -> R) -> R {
+    SCRATCH.with_borrow_mut(f)
+}
+
 fn target_keys(kind: &FpKind, t: &Target) -> Vec<u64> {
-    let atoms: Vec<AtomLabels> = t.atoms.iter().map(AtomLabels::target).collect();
-    let nbrs: Vec<Vec<(usize, BondLabels)>> = t
-        .nbrs
-        .iter()
-        .map(|ns| ns.iter().map(|&(n, k)| (n as usize, BondLabels::target(k))).collect())
-        .collect();
-    let mut keys = Vec::new();
-    collect(kind, &atoms, &nbrs, &mut keys);
-    keys
+    with_scratch(|s| {
+        s.load_target(t);
+        s.collect(kind);
+        s.keys.clone()
+    })
 }
 
 fn query_keys(kind: &FpKind, q: &Query) -> Vec<u64> {
-    let atoms: Vec<AtomLabels> = q.atoms.iter().map(|a| AtomLabels::query(&a.known)).collect();
-    let nbrs: Vec<Vec<(usize, BondLabels)>> = q
-        .nbrs
-        .iter()
-        .map(|ns| ns.iter().map(|&(n, b)| (n, BondLabels::query(q.bonds[b].query))).collect())
-        .collect();
-    let mut keys = Vec::new();
-    collect(kind, &atoms, &nbrs, &mut keys);
-    keys
+    with_scratch(|s| {
+        s.load_query(q);
+        s.collect(kind);
+        s.keys.clone()
+    })
 }
 
 pub fn target_features(kind: &FpKind, t: &Target) -> Vec<u64> {
@@ -476,9 +570,17 @@ pub fn query_features(kind: &FpKind, q: &Query) -> Vec<u64> {
 }
 
 pub fn target_fp<const W: usize>(kind: &FpKind, t: &Target) -> Fp<W> {
-    fold(&target_keys(kind, t), kind.count_cap)
+    with_scratch(|s| {
+        s.load_target(t);
+        s.collect(kind);
+        s.fold(kind)
+    })
 }
 
 pub fn query_fp<const W: usize>(kind: &FpKind, q: &Query) -> Fp<W> {
-    fold(&query_keys(kind, q), kind.count_cap)
+    with_scratch(|s| {
+        s.load_query(q);
+        s.collect(kind);
+        s.fold(kind)
+    })
 }
