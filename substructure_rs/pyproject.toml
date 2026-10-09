@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "substructure-rs"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pure-Rust SMILES/SMARTS substructure search (benchmark 08)"
 requires-python = ">=3.13"
 

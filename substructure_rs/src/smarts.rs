@@ -127,6 +127,78 @@ impl Expr {
     }
 }
 
+/// Field offsets in `TargetAtom::packed`.
+const Z: u32 = 0;
+const AROM: u32 = 8;
+const H: u32 = 16;
+const DEGREE: u32 = 24;
+const CHARGE: u32 = 32;
+
+impl TargetAtom {
+    /// Every property in one word, for `AtomTest`.
+    #[inline]
+    pub fn packed(&self) -> u64 {
+        (self.z as u64) << Z
+            | (self.aromatic as u64) << AROM
+            | (self.total_h as u64) << H
+            | (self.degree as u64) << DEGREE
+            | (self.charge as u8 as u64) << CHARGE
+    }
+}
+
+/// An atom expression compiled to `packed & mask == value` terms, any of which
+/// may hold; `None` when the expression does not fit (negations, wide ORs).
+pub fn compile_atom(e: &Expr) -> Option<Vec<(u64, u64)>> {
+    const MAX_TERMS: usize = 8;
+    let field = |shift: u32, v: u64| (0xffu64 << shift, (v & 0xff) << shift);
+    match e {
+        Expr::Prim(p) => Some(vec![match *p {
+            Prim::Element { z, aromatic: None } => field(Z, z as u64),
+            Prim::Element { z, aromatic: Some(a) } => {
+                let (m1, v1) = field(Z, z as u64);
+                let (m2, v2) = field(AROM, a as u64);
+                (m1 | m2, v1 | v2)
+            }
+            Prim::Aromatic(a) => field(AROM, a as u64),
+            Prim::TotalH(h) => field(H, h as u64),
+            Prim::Degree(d) => field(DEGREE, d as u64),
+            Prim::Charge(q) => field(CHARGE, q as u8 as u64),
+            Prim::True => (0, 0),
+        }]),
+        Expr::Not(inner) => match **inner {
+            Expr::Prim(Prim::Aromatic(a)) => Some(vec![field(AROM, !a as u64)]),
+            _ => None,
+        },
+        Expr::Or(es) => {
+            let mut terms = Vec::new();
+            for x in es {
+                terms.extend(compile_atom(x)?);
+            }
+            (terms.len() <= MAX_TERMS).then_some(terms)
+        }
+        Expr::And(es) => {
+            let mut terms = vec![(0u64, 0u64)];
+            for x in es {
+                let rhs = compile_atom(x)?;
+                let mut next = Vec::new();
+                for &(m1, v1) in &terms {
+                    for &(m2, v2) in &rhs {
+                        // Both constrain a field to different values: never true.
+                        if (v1 ^ v2) & m1 & m2 == 0 {
+                            next.push((m1 | m2, v1 | v2));
+                        }
+                    }
+                }
+                if next.len() > MAX_TERMS {
+                    return None;
+                }
+                terms = next;
+            }
+            Some(terms)
+        }
+    }
+}
+
 const ORGANIC: [&str; 10] = ["Cl", "Br", "B", "C", "N", "O", "P", "S", "F", "I"];
 const AROMATIC: [&str; 10] = ["se", "te", "as", "si", "b", "c", "n", "o", "p", "s"];
 
