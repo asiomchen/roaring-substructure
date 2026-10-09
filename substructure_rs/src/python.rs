@@ -18,13 +18,20 @@ fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>>
     d.set_item("reactants", r.reactants)?;
     d.set_item("postings", r.postings)?;
     d.set_item("threads", r.threads)?;
+    d.set_item("fp_kind", &r.fp_kind)?;
+    d.set_item("fp_bits", r.fp_bits)?;
+    d.set_item("order", &r.order)?;
     d.set_item("read_seconds", r.read_seconds)?;
     d.set_item("parse_queries_seconds", r.parse_queries_seconds)?;
     d.set_item("parse_reactants_seconds", r.parse_reactants_seconds)?;
     d.set_item("build_seconds", r.build_seconds)?;
     d.set_item("match_seconds", r.match_seconds.clone())?;
     d.set_item("match_median_seconds", r.match_median())?;
+    d.set_item("phase_seconds", r.phase_seconds.to_vec())?;
     d.set_item("index_bytes", r.index_bytes)?;
+    d.set_item("query_density", r.query_density)?;
+    d.set_item("target_density", r.target_density)?;
+    d.set_item("posted", r.posted)?;
     d.set_item("candidates", r.candidates)?;
     d.set_item("matches", r.matches)?;
     d.set_item("digest", &r.digest)?;
@@ -43,6 +50,8 @@ fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>>
 /// Run benchmark 08 and return its report as a dict.
 ///
 /// Paths are relative to the current directory. `threads=0` uses all cores.
+/// `fp_kind` and `fp_bits` pick the screening fingerprint (benchmark 09);
+/// `FP_KINDS` and `FP_SIZES` list the choices.
 /// With `print_report=True` the command-line summary is printed as well.
 #[pyfunction]
 #[pyo3(signature = (
@@ -51,6 +60,9 @@ fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>>
     postings = 128,
     runs = 3,
     threads = 0,
+    fp_kind = crate::fingerprint::DEFAULT_FP_KIND.to_string(),
+    fp_bits = crate::fingerprint::DEFAULT_FP_BITS,
+    order = crate::matcher::DEFAULT_ORDER.to_string(),
     reference = None,
     dump_atoms = None,
     print_report = false,
@@ -63,11 +75,14 @@ fn run<'py>(
     postings: usize,
     runs: usize,
     threads: usize,
+    fp_kind: String,
+    fp_bits: usize,
+    order: String,
     reference: Option<PathBuf>,
     dump_atoms: Option<PathBuf>,
     print_report: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let opts = Options { queries_file, reactants_file, postings, runs, threads, reference, dump_atoms };
+    let opts = Options { queries_file, reactants_file, postings, runs, threads, fp_kind, fp_bits, order, reference, dump_atoms, analyze: false, search_stats: false };
     let report = py.detach(|| crate::run(&opts)).map_err(PyValueError::new_err)?;
     if print_report {
         crate::print_report(&report);
@@ -98,5 +113,8 @@ fn substructure_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cli, m)?)?;
     m.add_function(wrap_pyfunction!(main, m)?)?;
     m.add("USAGE", crate::USAGE)?;
+    m.add("FP_KINDS", crate::fingerprint::FP_KINDS.iter().map(|k| k.name).collect::<Vec<_>>())?;
+    m.add("FP_SIZES", crate::fingerprint::FP_SIZES.to_vec())?;
+    m.add("ORDERS", crate::matcher::ORDERS.iter().map(|(n, _)| *n).collect::<Vec<_>>())?;
     Ok(())
 }
