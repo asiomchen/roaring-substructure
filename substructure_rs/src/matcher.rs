@@ -3,13 +3,11 @@
 //! Author: Marcin Kowiel + Claude
 
 use crate::mol::{BondType, Mol, TargetAtom};
-use crate::smarts::{compile_atom, BondQuery, Expr, Query};
+use crate::smarts::{BondQuery, Query};
 
 /// A reactant prepared for repeated matching.
 pub struct Target {
     pub atoms: Vec<TargetAtom>,
-    /// `TargetAtom::packed` per atom.
-    packed: Vec<u64>,
     /// Per atom: (neighbor, bond type).
     pub nbrs: Vec<Vec<(u32, BondType)>>,
 }
@@ -21,9 +19,7 @@ impl Target {
             .iter()
             .map(|ns| ns.iter().map(|&(n, b)| (n as u32, mol.bonds[b].kind)).collect())
             .collect();
-        let atoms = mol.target_atoms();
-        let packed = atoms.iter().map(|a| a.packed()).collect();
-        Target { atoms, packed, nbrs }
+        Target { atoms: mol.target_atoms(), nbrs }
     }
 
     #[inline]
@@ -38,40 +34,6 @@ pub struct Plan {
     /// For step k: (earlier step index, bond query); the first is the anchor when present.
     back: Vec<Vec<(usize, BondQuery)>>,
     anchored: Vec<bool>,
-    /// For step k: the query atom's test.
-    tests: Vec<AtomTest>,
-}
-
-/// A query atom's test against a target atom.
-enum AtomTest {
-    /// `packed & mask == value`.
-    One(u64, u64),
-    /// Any of these terms.
-    Any(Vec<(u64, u64)>),
-    /// Evaluate the expression (it did not compile).
-    Expr(Expr),
-}
-
-impl AtomTest {
-    fn new(e: &Expr) -> Self {
-        match compile_atom(e) {
-            Some(terms) if terms.len() == 1 => AtomTest::One(terms[0].0, terms[0].1),
-            Some(terms) => AtomTest::Any(terms),
-            None => AtomTest::Expr(e.clone()),
-        }
-    }
-
-    #[inline]
-    fn matches(&self, t: &Target, atom: u32) -> bool {
-        match self {
-            AtomTest::One(mask, value) => t.packed[atom as usize] & mask == *value,
-            AtomTest::Any(terms) => {
-                let p = t.packed[atom as usize];
-                terms.iter().any(|&(mask, value)| p & mask == value)
-            }
-            AtomTest::Expr(e) => e.matches(&t.atoms[atom as usize]),
-        }
-    }
 }
 
 impl Plan {
@@ -125,43 +87,32 @@ impl Plan {
             anchored.push(!b.is_empty());
             back.push(b);
         }
-        let tests = order.iter().map(|&i| AtomTest::new(&q.atoms[i].expr)).collect();
-        Plan { order, back, anchored, tests }
+        Plan { order, back, anchored }
     }
 }
 
 /// Does `q` occur in `t`?
-pub fn has_match(_q: &Query, plan: &Plan, t: &Target) -> bool {
+pub fn has_match(q: &Query, plan: &Plan, t: &Target) -> bool {
     let n = plan.order.len();
     if n > t.atoms.len() {
         return false;
     }
-    // Small molecules keep the search state on the stack.
-    const STACK_ATOMS: usize = 64;
-    const STACK_WORDS: usize = 8;
-    let words = t.atoms.len().div_ceil(64);
-    if n <= STACK_ATOMS && words <= STACK_WORDS {
-        let mut mapped = [u32::MAX; STACK_ATOMS];
-        let mut used = [0u64; STACK_WORDS];
-        search(plan, t, 0, &mut mapped[..n], &mut used[..words])
-    } else {
-        search(plan, t, 0, &mut vec![u32::MAX; n], &mut vec![0u64; words])
-    }
+    let mut mapped = vec![u32::MAX; n];
+    let mut used = vec![false; t.atoms.len()];
+    search(q, plan, t, 0, &mut mapped, &mut used)
 }
 
-/// `used` is a bitmap of target atoms already mapped.
-fn search(plan: &Plan, t: &Target, k: usize, mapped: &mut [u32], used: &mut [u64]) -> bool {
+fn search(q: &Query, plan: &Plan, t: &Target, k: usize, mapped: &mut [u32], used: &mut [bool]) -> bool {
     if k == plan.order.len() {
         return true;
     }
-    let test = &plan.tests[k];
+    let qa = &q.atoms[plan.order[k]];
     let back = &plan.back[k];
-    let skip = usize::from(plan.anchored[k]);
-    let try_atom = |cand: u32, mapped: &mut [u32], used: &mut [u64]| -> bool {
-        let (w, bit) = (cand as usize / 64, 1u64 << (cand % 64));
-        if used[w] & bit != 0 || !test.matches(t, cand) {
+    let try_atom = |cand: u32, mapped: &mut [u32], used: &mut [bool]| -> bool {
+        if used[cand as usize] || !qa.expr.matches(&t.atoms[cand as usize]) {
             return false;
         }
+        let skip = usize::from(plan.anchored[k]);
         for &(s, bq) in &back[skip..] {
             match t.bond(mapped[s], cand) {
                 Some(kind) if bq.matches(kind) => {}
@@ -169,11 +120,11 @@ fn search(plan: &Plan, t: &Target, k: usize, mapped: &mut [u32], used: &mut [u64
             }
         }
         mapped[k] = cand;
-        used[w] |= bit;
-        if search(plan, t, k + 1, mapped, used) {
+        used[cand as usize] = true;
+        if search(q, plan, t, k + 1, mapped, used) {
             return true;
         }
-        used[w] &= !bit;
+        used[cand as usize] = false;
         false
     };
     if plan.anchored[k] {

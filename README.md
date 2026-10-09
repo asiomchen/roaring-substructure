@@ -120,73 +120,6 @@ which yields borrowed pointers either way), and dropping the substructure SMARTS
 inner loop — fetching two elements per pair instead of three, and looking the label up only
 on the 0.055% of pairs that match — measured 5.88 s against 5.82 s, below the noise.
 
-### Benchmark 9: fingerprint kinds and sizes in the Rust pipeline
-
-`09_rust_native_fp.py` reruns benchmark 08 once per screening fingerprint: ten
-feature sets (`substructure_rs/src/fingerprint.rs`, `FP_KINDS`) at 512 to 8192 bits
-(16384 is also accepted). `paths4` at 4096 bits is benchmark 08. Every
-configuration returned the same 27,723 matches and the same digest, so each fingerprint
-is a lossless screen. Candidates are the pairs passed to exact matching; times are one
-thread, 128 postings, the mean of three sweeps of five-run medians (one sweep is in
-`benchmarks/09_rust_native_fp_1thread.csv`):
-
-| kind | candidates @512 | @1024 | @2048 | @4096 | @8192 | ms @512 | @1024 | @2048 | @4096 | @8192 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `atoms` | 3,474,743 | 3,352,688 | 3,101,522 | 3,031,375 | 3,007,897 | 786 | 812 | 811 | 941 | 1122 |
-| `paths2` | 398,319 | 309,824 | 261,012 | 246,688 | 240,897 | 139 | 125 | 118 | 128 | 149 |
-| `paths4` (08) | 198,692 | 120,555 | 95,748 | 88,651 | 86,771 | 88 | 73 | 68 | 74 | 89 |
-| `paths4-nocount` | 215,571 | 182,681 | 166,628 | 160,204 | 158,227 | 95 | 93 | 93 | 98 | 116 |
-| `paths6` | 495,676 | 126,083 | 80,524 | 70,834 | 67,843 | 158 | 86 | 79 | 83 | 98 |
-| `paths4+branches` | 180,577 | 106,554 | 79,671 | 73,148 | 71,317 | 85 | 68 | **63** | 67 | 79 |
-| `paths4+cycles` | 190,004 | 108,483 | 84,789 | 78,283 | 76,526 | 91 | 71 | 68 | 73 | 87 |
-| `paths4+branches+cycles` | 174,467 | 97,217 | 72,477 | 66,453 | 64,765 | 87 | 68 | **64** | 67 | 81 |
-| `paths4+long6+branches+cycles` | 201,211 | 93,728 | 66,311 | 59,838 | 57,791 | 99 | 75 | 69 | 73 | 86 |
-| `paths4+long8+branches+cycles` | 319,761 | 103,412 | 67,142 | 59,035 | 56,597 | 137 | 88 | 81 | 85 | 97 |
-
-Run-to-run spread is typically 2–4 ms, so `paths4+branches` and `paths4+branches+cycles`
-at 2048 bits tie.
-Branch (an atom with three neighbours) and cycle features cut candidates by up to 25%;
-longer paths cut more but cost more to build per reactant. Counting repeated features
-is worth 1.7x fewer candidates. Below 2048 bits the screen saturates — at 512, `paths6`
-sets so many bits that it passes six times more pairs than at 2048 — and above it each
-doubling removes at most 12% of candidates while doubling the bytes compared per
-candidate. 2048 bits is the fastest size for every kind except `atoms`, whose screen
-barely changes with size, the same trade-off as the cartridge's `sss_fp_size` above.
-
-**Where the time goes.** The report splits matching into building the reactant
-fingerprint, the posting filter, the full fingerprint check and exact matching. For
-`paths4+branches+cycles` at 2048 bits that is about 19, 15, 6 and 24 ms. Two changes
-got it there from 33, 15, 7 and 45 ms (about 100 ms in all), both with identical
-results:
-
-- Fingerprints count repeated features in a small hash table instead of by sorting, and
-  label paths in stack buffers.
-- Exact matching packs each reactant atom's element, aromaticity, H count, degree and
-  charge into one `u64` and compiles each query atom to `packed & mask == value` (a few
-  such terms for `,`; the expression tree remains for anything else, which this data
-  never needs), and keeps the search state on the stack instead of allocating per pair.
-  That halved exact matching and took benchmark 08 from 12 to 8 ms on all cores.
-
-The posting count is not a lever: 128 is best or tied at every size, since 64 leaves more
-for the fingerprint check and 256 costs more in the filter than it saves.
-
-**Why screened pairs fail.** `--analyze-false-positives` takes each pair that passes the
-screen but not the exact match, drops one kind of query constraint at a time, and
-matches again. For `paths4+branches+cycles` at 2048 bits (44,754 false positives):
-
-- 21% pass only because folding put distinct features on one bit (4% at 8192 bits);
-  the rest would pass even with unfolded features.
-- H counts, degree and charge explain under 0.5% between them, aromaticity and bond
-  order about 2% each, and the element 23%. The remaining 74% need more than one kind
-  dropped: two-thirds of those match the bare query graph once every label is removed,
-  so the shape is there and each label is there, but not on the same atoms.
-- Queries spanning at most 4 bonds are 13% of queries but 44% of false positives.
-
-So the screen misses label combinations over more atoms than its features cover, not
-any one kind of label, which is why longer paths help candidates; what holds them back
-is the cost of enumerating them per reactant, now that a false positive costs only
-about 0.3 µs to reject.
-
 ## In PostgreSQL
 
 `benchmarks/postgres/` does the same search with the substructures stored as `qmol` in an
@@ -363,7 +296,6 @@ uv run benchmarks/05a_numpy_postings.py
 uv run benchmarks/06_rust_postings.py
 uv run benchmarks/07_rust_postings_process.py
 uv run benchmarks/08_rust_native.py
-uv run benchmarks/09_rust_native_fp.py --threads 1 --csv benchmarks/09_rust_native_fp_1thread.csv
 
 PG_MAJOR=18 uv run benchmarks/postgres/bench.py --phase setup   # pulls and starts the server
 for phase in load index match verify; do
