@@ -275,3 +275,21 @@ fn every_atom_order_finds_the_same_matches() {
         }
     }
 }
+
+#[test]
+fn fingerprints_do_not_depend_on_atom_order() {
+    // The same molecules written from different starting atoms.
+    let pairs = [
+        ("OCC(=O)N", "NC(=O)CO"),
+        ("c1ccncc1C(=O)O", "OC(=O)c1cnccc1"),
+        ("C1CC2CCC1C2", "C1CC2CC1CC2"),
+        ("CC(C)(C)c1ccc(O)cc1", "Oc1ccc(cc1)C(C)(C)C"),
+    ];
+    for kind in &FP_KINDS {
+        for (a, b) in pairs {
+            let fa: Fp<64> = target_fp(kind, &Target::new(&parse_smiles(a).unwrap()));
+            let fb: Fp<64> = target_fp(kind, &Target::new(&parse_smiles(b).unwrap()));
+            assert_eq!(fa, fb, "{} {a} vs {b}", kind.name);
+        }
+    }
+}

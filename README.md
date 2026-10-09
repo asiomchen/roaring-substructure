@@ -132,35 +132,44 @@ thread, 128 postings, the mean of three sweeps of five-run medians (one sweep is
 
 | kind | candidates @512 | @1024 | @2048 | @4096 | @8192 | ms @512 | @1024 | @2048 | @4096 | @8192 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `atoms` | 3,474,743 | 3,352,688 | 3,101,522 | 3,031,375 | 3,007,897 | 786 | 812 | 811 | 941 | 1122 |
-| `paths2` | 398,319 | 309,824 | 261,012 | 246,688 | 240,897 | 139 | 125 | 118 | 128 | 149 |
-| `paths4` (08) | 198,692 | 120,555 | 95,748 | 88,651 | 86,771 | 88 | 73 | 68 | 74 | 89 |
-| `paths4-nocount` | 215,571 | 182,681 | 166,628 | 160,204 | 158,227 | 95 | 93 | 93 | 98 | 116 |
-| `paths6` | 495,676 | 126,083 | 80,524 | 70,834 | 67,843 | 158 | 86 | 79 | 83 | 98 |
-| `paths4+branches` | 180,577 | 106,554 | 79,671 | 73,148 | 71,317 | 85 | 68 | **63** | 67 | 79 |
-| `paths4+cycles` | 190,004 | 108,483 | 84,789 | 78,283 | 76,526 | 91 | 71 | 68 | 73 | 87 |
-| `paths4+branches+cycles` | 174,467 | 97,217 | 72,477 | 66,453 | 64,765 | 87 | 68 | **64** | 67 | 81 |
-| `paths4+long6+branches+cycles` | 201,211 | 93,728 | 66,311 | 59,838 | 57,791 | 99 | 75 | 69 | 73 | 86 |
-| `paths4+long8+branches+cycles` | 319,761 | 103,412 | 67,142 | 59,035 | 56,597 | 137 | 88 | 81 | 85 | 97 |
+| `atoms` | 3,474,743 | 3,352,688 | 3,101,522 | 3,031,375 | 3,007,897 | 439 | 455 | 490 | 582 | 752 |
+| `paths2` | 386,534 | 318,754 | 260,291 | 249,366 | 240,228 | 95 | 90 | 89 | 101 | 119 |
+| `paths4` (08) | 206,487 | 123,539 | 98,665 | 90,417 | 86,729 | 62 | 54 | 54 | 60 | 74 |
+| `paths4-nocount` | 223,145 | 184,757 | 168,196 | 160,020 | 155,320 | 68 | 67 | 69 | 78 | 95 |
+| `paths6` | 527,390 | 129,625 | 83,543 | 73,369 | 67,763 | 89 | 60 | 56 | 60 | 74 |
+| `paths4+branches` | 194,355 | 106,458 | 82,461 | 74,663 | 71,375 | 60 | 51 | **50** | 55 | 67 |
+| `paths4+cycles` | 190,344 | 110,323 | 87,373 | 79,887 | 76,546 | 62 | 55 | 54 | 60 | 73 |
+| `paths4+branches+cycles` | 181,710 | 97,002 | 74,989 | 67,863 | 64,836 | 61 | 51 | **50** | 56 | 67 |
+| `paths4+long6+branches+cycles` | 212,281 | 92,540 | 68,449 | 60,780 | 57,629 | 68 | 55 | 54 | 59 | 71 |
+| `paths4+long8+branches+cycles` | 335,367 | 102,808 | 70,929 | 61,213 | 57,167 | 83 | 63 | 61 | 65 | 75 |
 
-Run-to-run spread is typically 2–4 ms, so `paths4+branches` and `paths4+branches+cycles`
-at 2048 bits tie.
-Branch (an atom with three neighbours) and cycle features cut candidates by up to 25%;
+Run-to-run spread is typically 3–5 ms, so `paths4+branches` and `paths4+branches+cycles`
+at 1024 and 2048 bits tie.
+Branch (an atom with three neighbours) and cycle features cut candidates by up to 24%;
 longer paths cut more but cost more to build per reactant. Counting repeated features
-is worth 1.7x fewer candidates. Below 2048 bits the screen saturates — at 512, `paths6`
-sets so many bits that it passes six times more pairs than at 2048 — and above it each
+is worth 1.7x fewer candidates. Below 1024 bits the screen saturates — at 512, `paths6`
+sets so many bits that it passes six times more pairs than at 2048 — and above 2048 each
 doubling removes at most 12% of candidates while doubling the bytes compared per
-candidate. 2048 bits is the fastest size for every kind except `atoms`, whose screen
-barely changes with size, the same trade-off as the cartridge's `sss_fp_size` above.
+candidate. 1024–2048 bits is the fastest range for every kind except `atoms`, whose
+screen barely changes with size, the same trade-off as the cartridge's `sss_fp_size`
+above. Which features happen to share a bit after folding moves candidate counts by a
+few percent: salting the path hash differently gave `paths4` at 2048 bits anywhere from
+95,748 to 101,792 candidates, so differences that small between kinds are not signal.
 
 **Where the time goes.** The report splits matching into building the reactant
 fingerprint, the posting filter, the full fingerprint check and exact matching. For
-`paths4+branches+cycles` at 2048 bits that is about 19, 15, 6 and 24 ms. Two changes
-got it there from 33, 15, 7 and 45 ms (about 100 ms in all), both with identical
-results:
+`paths4+branches+cycles` at 2048 bits that is about 13, 15, 6 and 16 ms. These changes
+got it there from 33, 15, 7 and 45 ms (about 100 ms in all), with identical results:
 
-- Fingerprints count repeated features in a small hash table instead of by sorting, and
-  label paths in stack buffers.
+- Fingerprints count repeated features in a small hash table instead of by sorting.
+- Paths are hashed incrementally: each labelling keeps a polynomial hash of its labels
+  read forward and one read backward, both extended in constant time as the path grows,
+  and the smaller keys the path in either direction. Before, every path rebuilt its
+  label sequence, compared the two directions and rehashed it for each labelling.
+  A labelling with an open query label stops its path from growing. Reactant
+  fingerprints went from about 19 to 13 ms (a third to 40% less for every kind), index builds
+  from 0.70 to 0.45 s. Reusing per-thread buffers and a flat neighbour list, tried
+  first, saved nothing measurable: the cost was hashing, not allocation.
 - Exact matching packs each reactant atom's element, aromaticity, H count, degree and
   charge into one `u64` and compiles each query atom to `packed & mask == value` (a few
   such terms for `,`; the expression tree remains for anything else, which this data
@@ -193,12 +202,12 @@ pair:
 | `paths4+branches` | 19.7 | 17.0 | 18.7 | **52.5** |
 | `paths4+branches+cycles` | 18.0 | 15.0 | 16.0 | 54.0 |
 
-(one thread, mean of three sweeps; the main table above predates these changes, which
-lower every row's exact-match time.)
+(one thread, mean of three sweeps, before the incremental path hashing above.)
 
 **Why screened pairs fail.** `--analyze-false-positives` takes each pair that passes the
 screen but not the exact match, drops one kind of query constraint at a time, and
-matches again. For `paths4+branches+cycles` at 2048 bits (44,754 false positives):
+matches again. For `paths4+branches+cycles` at 2048 bits (44,754 false positives, measured
+before the path-hash change, which moves these counts by a few percent):
 
 - 21% pass only because folding put distinct features on one bit (4% at 8192 bits);
   the rest would pass even with unfolded features.
