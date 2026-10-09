@@ -446,6 +446,11 @@ wheels = [
 ]
 
 [[package]]
+name = "chematic-bench"
+version = "0.1.0"
+source = { directory = "chematic_bench" }
+
+[[package]]
 name = "cli-exit-tools"
 version = "1.2.7"
 source = { registry = "https://pypi.org/simple" }
@@ -2596,6 +2601,7 @@ name = "roaring-substructure"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "chematic-bench" },
     { name = "datamol" },
     { name = "huggingface-hub" },
     { name = "joblib" },
@@ -2622,6 +2628,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "chematic-bench", directory = "chematic_bench" },
     { name = "datamol", specifier = ">=0.13.0" },
     { name = "huggingface-hub", specifier = ">=1.32.0" },
     { name = "joblib", specifier = ">=1.6.0" },

@@ -201,7 +201,8 @@ pub fn cli<I: IntoIterator<Item = String>>(args: I) -> i32 {
     }
 }
 
-fn read_column(path: &Path, column: &str) -> Result<Vec<String>, String> {
+/// One string column of a `.parquet` or `.csv` file.
+pub fn read_column(path: &Path, column: &str) -> Result<Vec<String>, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext == "parquet" {
         use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -393,6 +394,61 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
         comparison,
         analysis,
     })
+}
+
+/// Pairs that pass this crate's screen, for checking with another exact
+/// matcher (benchmark 10). Uses `queries_file`, `reactants_file`, `fp_kind`,
+/// `fp_bits`, `postings` and `threads` from `opts`.
+pub struct Candidates {
+    pub smarts: Vec<String>,
+    pub smiles: Vec<String>,
+    /// Per reactant, screened query IDs, ascending.
+    pub per_reactant: Vec<Vec<u32>>,
+    /// Wall-clock seconds for reactant fingerprints and the screen.
+    pub screen_seconds: f64,
+}
+
+pub fn candidates(opts: &Options) -> Result<Candidates, String> {
+    opts.validate()?;
+    let go = || {
+        let smarts = read_column(&opts.queries_file, "substructure")?;
+        let smiles = read_column(&opts.reactants_file, "smiles")?;
+        let queries = parse_all(&smarts, "query", smarts::parse_smarts)?;
+        let mols = parse_all(&smiles, "reactant", mol::parse_smiles)?;
+        let targets: Vec<Target> = mols.par_iter().map(Target::new).collect();
+        let kind = fp_kind(&opts.fp_kind)?;
+        let (per_reactant, screen_seconds) = match opts.fp_bits {
+            512 => screen_all::<8>(&kind, queries, &targets, opts),
+            1024 => screen_all::<16>(&kind, queries, &targets, opts),
+            2048 => screen_all::<32>(&kind, queries, &targets, opts),
+            4096 => screen_all::<64>(&kind, queries, &targets, opts),
+            8192 => screen_all::<128>(&kind, queries, &targets, opts),
+            16384 => screen_all::<256>(&kind, queries, &targets, opts),
+            other => return Err(format!("fingerprint size {other} not supported")),
+        };
+        Ok(Candidates { smarts, smiles, per_reactant, screen_seconds })
+    };
+    if opts.threads > 0 {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(opts.threads).build().map_err(|e| e.to_string())?;
+        pool.install(go)
+    } else {
+        go()
+    }
+}
+
+fn screen_all<const W: usize>(kind: &FpKind, queries: Vec<Query>, targets: &[Target], opts: &Options) -> (Vec<Vec<u32>>, f64) {
+    let index = Index::<W>::build(kind, matcher::order(&opts.order).expect("validated"), queries);
+    let start = Instant::now();
+    let per = targets
+        .par_iter()
+        .map(|t| {
+            let fp = target_fp::<W>(kind, t);
+            let mut out = Vec::new();
+            index.subset_filter(&fp, &index.posting_filter(&fp, opts.postings), &mut out);
+            out
+        })
+        .collect();
+    (per, start.elapsed().as_secs_f64())
 }
 
 /// Index build and timed matching runs for one fingerprint width.

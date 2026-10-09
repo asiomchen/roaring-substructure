@@ -222,6 +222,37 @@ any one kind of label, which is why longer paths help candidates; what holds the
 is the cost of enumerating them per reactant, now that a false positive costs only
 about 0.3 µs to reject.
 
+### Benchmark 10: the chematic crates
+
+[chematic](https://github.com/kent-tokyo/chematic) is a pure-Rust cheminformatics
+toolkit with its own SMILES parser, SMARTS parser and VF2 matcher (`chematic-smiles`,
+`chematic-smarts` 1.0.37). `10_chematic.py` runs this workload with it, through the
+`chematic_bench` crate, in two modes. `naive` checks every pair with
+`has_match_with_config`, like `01` does with RDKit. `screened` lets `substructure_rs`'s
+screen (`paths4+branches`, 2048 bits) pick the candidates outside the timer and has
+chematic check only those, so the timer measures chematic's matcher on the pairs
+benchmark 08's own matcher sees. chematic cannot screen this workload itself: its
+Pattern fingerprint, a port of RDKit's, covers concrete molecules only, not SMARTS
+queries.
+
+Both modes parse all 50,000 queries and 1,000 reactants and return the same 27,723
+matches and digest as RDKit and benchmark 08:
+
+| | 1 thread | 14 threads |
+|---|---:|---:|
+| chematic `naive` (50M pairs) | 22.0 s | 2.96 s |
+| chematic `screened` (82,461 pairs, exact match only) | 0.15 s | 18 ms |
+| benchmark 08 matcher on the same pairs | 0.019 s | — |
+| benchmark 08 whole match step (fingerprints, screen, exact) | 0.050 s | 5 ms |
+
+chematic's brute force is 3.4x faster than RDKit's in `01` (75.5 s) on one thread, helped
+by an element-count check it runs before each search. On the screened pairs, which are
+the hard ones (a third match, the rest nearly do), it spends about 1.8 µs per pair
+against about 0.2 µs for `substructure_rs`'s specialised matcher, so as a drop-in exact
+matcher behind this screen it would take matching from about 50 to about 180 ms. Its
+value here is as an independent, RDKit-equivalent check of `substructure_rs`'s parsing
+and matching, which it confirms on all 50M pairs.
+
 ## In PostgreSQL
 
 `benchmarks/postgres/` does the same search with the substructures stored as `qmol` in an
@@ -399,6 +430,8 @@ uv run benchmarks/06_rust_postings.py
 uv run benchmarks/07_rust_postings_process.py
 uv run benchmarks/08_rust_native.py
 uv run benchmarks/09_rust_native_fp.py --threads 1 --csv benchmarks/09_rust_native_fp_1thread.csv
+uv run benchmarks/10_chematic.py --mode naive
+uv run benchmarks/10_chematic.py --mode screened --threads 1
 
 PG_MAJOR=18 uv run benchmarks/postgres/bench.py --phase setup   # pulls and starts the server
 for phase in load index match verify; do

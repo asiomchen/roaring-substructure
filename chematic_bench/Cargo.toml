@@ -1,0 +1,30 @@
+[package]
+name = "chematic_bench"
+version = "0.1.0"
+edition = "2021"
+description = "Benchmark 10: substructure search with the chematic crates"
+
+[lib]
+name = "chematic_bench"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "chematic_bench"
+path = "src/main.rs"
+
+[features]
+# Python bindings, enabled by maturin (see pyproject.toml).
+python = ["dep:pyo3"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[dependencies]
+pyo3 = { version = "0.26", features = ["extension-module"], optional = true }
+chematic-core = "1.0.37"
+chematic-smarts = "1.0.37"
+chematic-smiles = "1.0.37"
+rayon = "1.12.0"
+sha2 = "0.11.0"
+substructure_rs = { path = "../substructure_rs" }
