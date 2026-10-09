@@ -3,8 +3,7 @@
 //! Reads reaction-template SMARTS and reactant SMILES, builds the posting-list
 //! index, and matches every reactant against every screened query in parallel.
 //! The digest uses the same encoding as benchmarks 05a-07, so it can be
-//! compared with RDKit's result directly. Benchmark 09 reruns it over the
-//! fingerprint kinds and sizes of `--fp-kind` / `--fp-bits`.
+//! compared with RDKit's result directly.
 //!
 //! Used three ways: the `substructure_rs` binary (`src/main.rs`), the same
 //! command installed by uv as a Python entry point, and `substructure_rs.run()`
@@ -12,7 +11,6 @@
 //!
 //! Author: Marcin Kowiel + Claude
 
-mod analysis;
 mod fingerprint;
 mod index;
 mod matcher;
@@ -25,10 +23,9 @@ mod tests;
 #[cfg(feature = "python")]
 mod python;
 
-use fingerprint::{fp_kind, target_fp, FpKind};
-use index::{Index, Matched};
+use fingerprint::target_fp;
+use index::Index;
 use matcher::Target;
-use smarts::Query;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -38,11 +35,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub const USAGE: &str = "usage: substructure_rs [--queries-file F] [--reactants-file F] [--postings N] \
-[--runs N] [--threads N] [--fp-kind K] [--fp-bits N] [--reference pairs.bin] [--dump-atoms out.txt]\n\
-[--analyze-false-positives]\n\
-Files may be .parquet or .csv; queries use column `substructure`, reactants `smiles`.\n\
---fp-kind: atoms, paths2, paths4 (default), paths4-nocount, paths6, paths4+branches,\n\
-paths4+cycles, paths4+branches+cycles. --fp-bits: 512, 1024, 2048, 4096 (default), 8192, 16384.";
+[--runs N] [--threads N] [--reference pairs.bin] [--dump-atoms out.txt]\n\
+Files may be .parquet or .csv; queries use column `substructure`, reactants `smiles`.";
 
 /// Benchmark settings; `Options::default()` matches the command-line defaults.
 #[derive(Clone, Debug)]
@@ -53,16 +47,10 @@ pub struct Options {
     pub runs: usize,
     /// 0 = all cores.
     pub threads: usize,
-    /// Screening fingerprint features, a name from `fingerprint::FP_KINDS`.
-    pub fp_kind: String,
-    /// Screening fingerprint size, one of `fingerprint::FP_SIZES`.
-    pub fp_bits: usize,
     /// RDKit match pairs to compare against (from `tools/rdkit_reference.py`).
     pub reference: Option<PathBuf>,
     /// Write per-atom properties in the format of `tools/rdkit_reference.py`.
     pub dump_atoms: Option<PathBuf>,
-    /// Report why screened pairs fail the exact match (see `analysis.rs`).
-    pub analyze: bool,
 }
 
 impl Default for Options {
@@ -73,21 +61,16 @@ impl Default for Options {
             postings: 128,
             runs: 3,
             threads: 0,
-            fp_kind: fingerprint::DEFAULT_FP_KIND.into(),
-            fp_bits: fingerprint::DEFAULT_FP_BITS,
             reference: None,
             dump_atoms: None,
-            analyze: false,
         }
     }
 }
 
 impl Options {
     pub fn validate(&self) -> Result<(), String> {
-        fp_kind(&self.fp_kind)?;
-        fingerprint::check_fp_bits(self.fp_bits)?;
-        if !(1..=self.fp_bits).contains(&self.postings) {
-            return Err(format!("postings must be between 1 and {}", self.fp_bits));
+        if !(1..=fingerprint::FP_BITS).contains(&self.postings) {
+            return Err(format!("postings must be between 1 and {}", fingerprint::FP_BITS));
         }
         if self.runs < 1 {
             return Err("runs must be at least 1".into());
@@ -112,29 +95,16 @@ pub struct Report {
     pub reactants: usize,
     pub postings: usize,
     pub threads: usize,
-    pub fp_kind: String,
-    pub fp_bits: usize,
     pub read_seconds: f64,
     pub parse_queries_seconds: f64,
     pub parse_reactants_seconds: f64,
     pub build_seconds: f64,
     pub match_seconds: Vec<f64>,
-    /// Time inside matching by step, summed over reactants (CPU seconds, so
-    /// it exceeds the wall clock with several threads), mean over runs:
-    /// reactant fingerprint, posting filter, fingerprint check, exact match.
-    pub phase_seconds: [f64; 4],
     pub index_bytes: usize,
-    /// Mean fraction of fingerprint bits set, over queries and over reactants.
-    pub query_density: f64,
-    pub target_density: f64,
-    /// Pairs left after the posting filter.
-    pub posted: usize,
-    /// Pairs left after the full fingerprint check, i.e. sent to exact matching.
     pub candidates: usize,
     pub matches: usize,
     pub digest: String,
     pub comparison: Option<Comparison>,
-    pub analysis: Option<String>,
 }
 
 impl Report {
@@ -158,16 +128,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Option<Opti
             "--postings" => opts.postings = value()?.parse().map_err(|e| format!("--postings: {e}"))?,
             "--runs" => opts.runs = value()?.parse().map_err(|e| format!("--runs: {e}"))?,
             "--threads" => opts.threads = value()?.parse().map_err(|e| format!("--threads: {e}"))?,
-            "--fp-kind" => opts.fp_kind = value()?,
-            "--fp-bits" => opts.fp_bits = value()?.parse().map_err(|e| format!("--fp-bits: {e}"))?,
             "--reference" => opts.reference = Some(value()?.into()),
             "--dump-atoms" => opts.dump_atoms = Some(value()?.into()),
-            "--analyze-false-positives" => opts.analyze = true,
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    opts.validate()?;
+    opts.validate().map_err(|e| format!("--{e}"))?;
     Ok(Some(opts))
 }
 
@@ -305,25 +272,28 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
         dump_atoms(path, &mols).map_err(|e| format!("{}: {e}", path.display()))?;
     }
 
-    let kind = fp_kind(&opts.fp_kind)?;
-    let screened = match opts.fp_bits {
-        512 => screen_and_match::<8>(&kind, queries, &targets, opts),
-        1024 => screen_and_match::<16>(&kind, queries, &targets, opts),
-        2048 => screen_and_match::<32>(&kind, queries, &targets, opts),
-        4096 => screen_and_match::<64>(&kind, queries, &targets, opts),
-        8192 => screen_and_match::<128>(&kind, queries, &targets, opts),
-        16384 => screen_and_match::<256>(&kind, queries, &targets, opts),
-        other => return Err(format!("fingerprint size {other} not supported")),
-    };
-    let Screened { build_seconds, match_seconds, phase_seconds, index_bytes, query_density, target_density, per, analysis } =
-        screened;
+    let start = Instant::now();
+    let index = Index::build(queries);
+    let build_seconds = start.elapsed().as_secs_f64();
 
-    let posted = per.iter().map(|m| m.posted).sum();
-    let candidates = per.iter().map(|m| m.candidates).sum();
-    let matches = per.iter().map(|m| m.found.len()).sum();
+    let mut match_seconds = Vec::new();
+    let mut result = None;
+    for _ in 0..opts.runs {
+        let start = Instant::now();
+        let per: Vec<(usize, Vec<u32>)> = targets
+            .par_iter()
+            .map(|t| index.match_one(t, &target_fp(t), opts.postings))
+            .collect();
+        match_seconds.push(start.elapsed().as_secs_f64());
+        result.get_or_insert(per);
+    }
+    let per = result.expect("at least one run");
+
+    let candidates = per.iter().map(|(c, _)| c).sum();
+    let matches = per.iter().map(|(_, m)| m.len()).sum();
     let mut hasher = Sha256::new();
-    for (r, m) in per.iter().enumerate() {
-        for &q in &m.found {
+    for (r, (_, found)) in per.iter().enumerate() {
+        for &q in found {
             hasher.update((r as u32).to_le_bytes());
             hasher.update(q.to_le_bytes());
         }
@@ -339,7 +309,7 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
                 .map(|c| (u32::from_le_bytes(c[..4].try_into().unwrap()), u32::from_le_bytes(c[4..].try_into().unwrap())))
                 .collect();
             let ours: HashSet<(u32, u32)> =
-                per.iter().enumerate().flat_map(|(r, m)| m.found.iter().map(move |&q| (r as u32, q))).collect();
+                per.iter().enumerate().flat_map(|(r, (_, f))| f.iter().map(move |&q| (r as u32, q))).collect();
             let examples = |pairs: HashSet<&(u32, u32)>| {
                 let mut v: Vec<(u32, u32)> = pairs.into_iter().copied().collect();
                 v.sort_unstable();
@@ -362,96 +332,17 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
         reactants: smiles.len(),
         postings: opts.postings,
         threads: rayon::current_num_threads(),
-        fp_kind: opts.fp_kind.clone(),
-        fp_bits: opts.fp_bits,
         read_seconds,
         parse_queries_seconds,
         parse_reactants_seconds,
         build_seconds,
         match_seconds,
-        phase_seconds,
-        index_bytes,
-        query_density,
-        target_density,
-        posted,
+        index_bytes: index.nbytes(),
         candidates,
         matches,
         digest,
         comparison,
-        analysis,
     })
-}
-
-/// Index build and timed matching runs for one fingerprint width.
-struct Screened {
-    build_seconds: f64,
-    match_seconds: Vec<f64>,
-    phase_seconds: [f64; 4],
-    index_bytes: usize,
-    query_density: f64,
-    target_density: f64,
-    per: Vec<Matched>,
-    analysis: Option<String>,
-}
-
-fn screen_and_match<const W: usize>(kind: &FpKind, queries: Vec<Query>, targets: &[Target], opts: &Options) -> Screened {
-    let start = Instant::now();
-    let index = Index::<W>::build(kind, queries);
-    let build_seconds = start.elapsed().as_secs_f64();
-
-    let mut match_seconds = Vec::new();
-    let mut phase_seconds = [0.0; 4];
-    let mut result = None;
-    for _ in 0..opts.runs {
-        let start = Instant::now();
-        let per: Vec<(f64, Matched)> = targets
-            .par_iter()
-            .map(|t| {
-                let fp_start = Instant::now();
-                let fp = target_fp::<W>(kind, t);
-                let fp_seconds = fp_start.elapsed().as_secs_f64();
-                (fp_seconds, index.match_one(t, &fp, opts.postings))
-            })
-            .collect();
-        match_seconds.push(start.elapsed().as_secs_f64());
-        for (fp_seconds, m) in &per {
-            phase_seconds[0] += fp_seconds / opts.runs as f64;
-            for (p, s) in phase_seconds[1..].iter_mut().zip(m.seconds) {
-                *p += s / opts.runs as f64;
-            }
-        }
-        result.get_or_insert_with(|| per.into_iter().map(|(_, m)| m).collect());
-    }
-
-    let per: Vec<Matched> = result.expect("at least one run");
-    let analysis = opts.analyze.then(|| {
-        let candidates: Vec<Vec<u32>> = targets
-            .par_iter()
-            .map(|t| {
-                let fp = target_fp::<W>(kind, t);
-                let mut out = Vec::new();
-                index.subset_filter(&fp, &index.posting_filter(&fp, opts.postings), &mut out);
-                out
-            })
-            .collect();
-        let found: Vec<Vec<u32>> = per.iter().map(|m| m.found.clone()).collect();
-        analysis::false_positives(kind, &index.queries, targets, &candidates, &found)
-    });
-
-    let target_ones: u64 = targets
-        .par_iter()
-        .map(|t| target_fp::<W>(kind, t).iter().map(|w| w.count_ones() as u64).sum::<u64>())
-        .sum();
-    Screened {
-        build_seconds,
-        match_seconds,
-        phase_seconds,
-        index_bytes: index.nbytes(),
-        query_density: index.query_density(),
-        target_density: target_ones as f64 / (targets.len().max(1) * 64 * W) as f64,
-        per,
-        analysis,
-    }
 }
 
 pub fn print_report(r: &Report) {
@@ -462,13 +353,6 @@ pub fn print_report(r: &Report) {
         r.postings,
         r.match_seconds.len(),
         r.threads
-    );
-    println!(
-        "fingerprint     {} at {} bits; {:.1}% of bits set in queries, {:.1}% in reactants",
-        r.fp_kind,
-        r.fp_bits,
-        100.0 * r.query_density,
-        100.0 * r.target_density
     );
     println!("read files      {:>8.3} s", r.read_seconds);
     println!("parse SMARTS    {:>8.3} s", r.parse_queries_seconds);
@@ -483,12 +367,6 @@ pub fn print_report(r: &Report) {
         r.match_median(),
         r.match_seconds.iter().map(|t| (t * 1000.0).round() / 1000.0).collect::<Vec<_>>()
     );
-    let [fp, postings, subset, exact] = r.phase_seconds;
-    println!(
-        "  of which      {fp:.3} s reactant fingerprints, {postings:.3} s postings, \
-{subset:.3} s fingerprint check, {exact:.3} s exact match (summed over threads)"
-    );
-    println!("after postings  {:>8}", r.posted);
     println!("candidates      {:>8}  matches: {}", r.candidates, r.matches);
     println!("digest          {}", r.digest);
     if let Some(c) = &r.comparison {
@@ -498,8 +376,5 @@ pub fn print_report(r: &Report) {
                 println!("  {label} r{reactant} q{query}  {smiles}  {smarts}");
             }
         }
-    }
-    if let Some(a) = &r.analysis {
-        print!("{a}");
     }
 }
