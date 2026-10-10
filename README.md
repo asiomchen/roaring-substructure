@@ -65,13 +65,13 @@ passes 350,393 pairs (0.70%) on to the exact match.
   The same strategy — a Pattern fingerprint screen, then an exact recheck — inside the
   database.
 - **Roaring postings list**
-  ([`05_roaring_postings.py`](benchmarks/05_roaring_postings.py)): an inverted index
+  ([`05_postings.py --index roaring`](benchmarks/05_postings.py)): an inverted index
   over the fingerprint bits.
   Each bit maps to a Roaring bitmap of the query IDs containing it; for each reactant,
   the postings of 128 frequent bits *absent* from it rule out queries before the full
   screen and exact match.
 - **Packed NumPy bitmaps**
-  ([`05a_numpy_postings.py`](benchmarks/05a_numpy_postings.py)): the same algorithm with
+  ([`05_postings.py --index numpy`](benchmarks/05_postings.py)): the same algorithm with
   packed NumPy `uint64` arrays and vectorized unions.
   The fastest single-process Python implementation here; the Roaring version remains
   easier to read and maintain.
@@ -92,8 +92,8 @@ Runs vary by a few percent; the sections below give the detailed measurements.
 | Roaring fingerprint scan | `03_roaring_approach.py` | 5.823 s |
 | PostgreSQL, one connection | `postgres/bench.py` | 8.235 s |
 | PostgreSQL, ten connections | `postgres/bench.py` | 1.600 s |
-| Roaring postings list | `05_roaring_postings.py` | 1.610 s |
-| NumPy postings list | `05a_numpy_postings.py` | 1.261 s |
+| Roaring postings list | `05_postings.py --index roaring` | 1.610 s |
+| NumPy postings list | `05_postings.py --index numpy` | 1.261 s |
 | Native Rust, one thread | `08_rust_native.py --threads 1` | 0.113 s |
 | Native Rust, tuned fingerprint, one thread | `09_rust_native_fp.py` (`paths4+branches`, 2048 bits) | **0.050 s** |
 
@@ -110,7 +110,7 @@ Each is the median of three interleaved runs, which land within 2–4%.
 | `02_pattern.py` | RDKit `PatternFingerprint` + `AllProbeBitsMatch` | 23.1 s |
 | `03_roaring_approach.py` | pyroaring `BitMap.issubset` | **5.9 s** |
 
-`05_roaring_postings.py` changes the candidate search.
+`05_postings.py` changes the candidate search.
 It builds a Roaring posting bitmap of substructure IDs for each of the 2,048
 Pattern-fingerprint bits.
 For each reactant it unions the postings for 128 high-frequency bits *absent* from that
@@ -147,12 +147,14 @@ The complete index can be pickled and loaded in another Python process.
 
 ### Benchmark 5a: NumPy packed bitmaps
 
-`05a_numpy_postings.py` repeats benchmark 5 with packed NumPy `uint64` arrays for query
-fingerprints and posting bitmaps.
+`05_postings.py --index numpy` repeats benchmark 5 with packed NumPy `uint64` arrays for
+query fingerprints and posting bitmaps.
 It keeps the same query order, 128 selected absent-bit postings, fingerprint subset
 check, exact match, and `match_many` result shape.
-The script runs each backend in a fresh process and verifies identical ordered match
-sets. On macOS arm64 with Python 3.13.14, three matching runs per backend gave:
+`05_postings.py` runs each index and fingerprint combination in a fresh process, and all
+of them must return the same matches and digest.
+The table below was measured with an earlier version of the script.
+On macOS arm64 with Python 3.13.14, three matching runs per backend gave:
 
 | bitmap | index build | median match | full index pickle | bitmap data pickle | added RSS after build |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -190,7 +192,7 @@ To regenerate and repeat the larger run:
 uv run scripts/subset_compounds.py --reactants 1000 --substructures 200000 --seed 42 \
   --reactants-out data/reactant_sample.csv \
   --substructures-out data/substructure_sample_200k.parquet
-uv run benchmarks/05a_numpy_postings.py --queries-file data/substructure_sample_200k.parquet
+uv run benchmarks/05_postings.py --index numpy --fingerprint pattern --queries-file data/substructure_sample_200k.parquet
 ```
 
 ![Matching-time bars and three-run error bars for the naive, Roaring, NumPy, and PostgreSQL methods](benchmarks/plots/all_methods_50k.png)
@@ -228,8 +230,8 @@ looking the label up only on the 0.055% of pairs that match — measured 5.88 s 
 
 ### Benchmark 5b: benchmark 08’s fingerprint in the NumPy index
 
-`05b_numpy_path_fp.py` keeps benchmark 5a’s NumPy index, postings and RDKit exact match,
-and changes only the screening fingerprint.
+`05_postings.py --fingerprint paths` keeps the same index, postings and RDKit exact
+match, and changes only the screening fingerprint (with either `--index`).
 `benchmarks/rdkit_path_fp.py` computes benchmark 08’s `paths4` fingerprint (labelled
 atoms and paths of up to 4 bonds, counted up to 4 times, 4096 bits) from the RDKit
 molecules in Python.
@@ -253,7 +255,7 @@ The index build is 3x slower, all of it Python fingerprinting of the 50,000 quer
 
 ### Benchmarks 06-08
 
-- `06_rust_postings.py` moves the posting screen of 05a into Rust (`rust_index/`) and
+- `06_rust_postings.py` moves the posting screen of 05 (NumPy index) into Rust (`rust_index/`) and
   keeps the exact match in RDKit.
 - `07_rust_postings_process.py` runs the same Rust screen with and without
   process-parallel exact matching.
@@ -271,7 +273,7 @@ Reference medians from the article, along with a rerun on the same Apple M4:
 
 | Benchmark | Command | Article | Rerun |
 | --- | --- | ---: | ---: |
-| 05a NumPy postings | `06_rust_postings.py` (numpy backend) | 1.213 s | 1.243 s |
+| 05 NumPy postings | `06_rust_postings.py` (numpy backend) | 1.213 s | 1.243 s |
 | 06 Rust screen + RDKit | `06_rust_postings.py` (rust backend) | 1.023 s | 1.034 s |
 | 07 Rust screen, no pool | `07_rust_postings_process.py --backend rust` | 1.020 s | 1.038 s |
 | 08 Native Rust | `08_rust_native.py --threads 1` | 0.113 s | 0.103 s |
@@ -611,9 +613,7 @@ uv run benchmarks/01_naive.py
 uv run benchmarks/02_pattern.py
 uv run benchmarks/03_roaring_approach.py
 uv run benchmarks/04_roaring_multiprocessing.py --processes 10   # not in the article
-uv run benchmarks/05_roaring_postings.py
-uv run benchmarks/05a_numpy_postings.py
-uv run benchmarks/05b_numpy_path_fp.py
+uv run benchmarks/05_postings.py   # Roaring and NumPy x Pattern and path fp
 
 # Rust benchmarks on one core, one after another
 RAYON_NUM_THREADS=1 uv run benchmarks/06_rust_postings.py
@@ -649,8 +649,8 @@ The digest is SHA-256 over the sorted (reactant index, query index) pairs, so ev
 benchmark that finds the same matches prints the same `72f6936d…`. A benchmark-specific
 section follows: how many pairs the postings and the fingerprint check drop and how many
 reach the exact match, and where measured, phase times, index sizes and memory.
-Benchmarks that compare variants (05a, 05b, 06, 07, 09) end with one table row per
-variant in the same columns.
+Benchmarks that compare variants (05, 06, 07, 09) end with one table row per variant in
+the same columns.
 
 ### Rebuild the dataset
 

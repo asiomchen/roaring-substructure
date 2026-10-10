@@ -1,7 +1,6 @@
 # Single-thread benchmark run
 
 - **Date:** 2026-10-10T16:39:25+02:00
-- **Commit:** `c78c4cd9febb` (with uncommitted changes)
 - **Machine:** Apple M4, 10 cores, 24.0 GiB, Darwin 27.0 (arm64)
 - **Software:** Python 3.13.14, RDKit 2026.3.6, NumPy 2.5.3, pyroaring 1.1.0, rustc 1.98.1 (48a229cea 2026-09-01)
 - **Threads:** one thread of work per benchmark, run one after another; `RAYON_NUM_THREADS=1`, `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `VECLIB_MAXIMUM_THREADS=1`, `MKL_NUM_THREADS=1`. No CPU pinning (macOS).
@@ -16,11 +15,10 @@ Times are seconds. Prep steps are outside the matching timer; matching is the me
 | 02_pattern |  | 0.6626 | 2.6830 | 0.0990 | **22.7681** | 26.2127 | 27,723 | 350,393 |
 | 03_roaring_approach |  | 0.6819 | 4.2408 | 0.0912 | **5.7220** | 10.7358 | 27,723 | 350,393 |
 | 04_roaring_multiprocessing |  | 0.6418 | 4.2280 | 0.0855 | **6.0045** | 10.9599 | 27,723 | 350,393 |
-| 05_roaring_postings |  | 0.6436 | 4.8337 | 0.0914 | **1.5298** | 7.0984 | 27,723 | 350,393 |
-| 05a_numpy_postings | roaring | 0.6526 | 4.9146 | 0.0930 | **1.5870** | 7.2471 | 27,723 | 350,393 |
-| 05a_numpy_postings | numpy | 0.6452 | 4.7411 | 0.0896 | **1.2187** | 6.6946 | 27,723 | 350,393 |
-| 05b_numpy_path_fp | pattern | 0.6451 | 4.7467 | 0.0939 | **1.2486** | 6.7343 | 27,723 | 350,393 |
-| 05b_numpy_path_fp | paths | 0.6486 | 15.4749 | 0.0914 | **0.9434** | 17.1584 | 27,723 | 90,664 |
+| 05_postings | roaring pattern | 0.7230 | 4.8787 | 0.1110 | **1.5352** | 7.2479 | 27,723 | 350,393 |
+| 05_postings | roaring paths | 0.6665 | 15.6294 | 0.1019 | **1.0226** | 17.4203 | 27,723 | 90,664 |
+| 05_postings | numpy pattern | 0.6503 | 4.7817 | 0.0902 | **1.3591** | 6.8814 | 27,723 | 350,393 |
+| 05_postings | numpy paths | 0.6659 | 15.6524 | 0.0915 | **1.0017** | 17.4115 | 27,723 | 90,664 |
 | 06_rust_postings | numpy | 0.6497 | 4.7464 | 0.0906 | **1.2190** | 6.7057 | 27,723 | 350,393 |
 | 06_rust_postings | rust | 0.6434 | 4.3745 | 0.0926 | **1.0218** | 6.1323 | 27,723 | 350,393 |
 | 07_rust_postings_process | rust | 0.6565 | 4.3196 | 0.0932 | **1.0177** | 6.0870 | 27,723 | 350,393 |
@@ -35,11 +33,10 @@ Settings per report:
 - 02_pattern: defaults
 - 03_roaring_approach: defaults
 - 04_roaring_multiprocessing: processes 1
-- 05_roaring_postings: postings 128
-- 05a_numpy_postings (roaring): postings 128; runs 3
-- 05a_numpy_postings (numpy): postings 128; runs 3
-- 05b_numpy_path_fp (pattern): fp bits 2048; postings 128; runs 3
-- 05b_numpy_path_fp (paths): fp bits 4096; postings 128; runs 3
+- 05_postings (roaring pattern): index roaring; fingerprint pattern; fp bits 2048; postings 128; runs 3
+- 05_postings (roaring paths): index roaring; fingerprint paths; fp bits 4096; postings 128; runs 3
+- 05_postings (numpy pattern): index numpy; fingerprint pattern; fp bits 2048; postings 128; runs 3
+- 05_postings (numpy paths): index numpy; fingerprint paths; fp bits 4096; postings 128; runs 3
 - 06_rust_postings (numpy): postings 128; runs 3
 - 06_rust_postings (rust): postings 128; runs 3
 - 07_rust_postings_process (rust): postings 128; runs 3; workers 1

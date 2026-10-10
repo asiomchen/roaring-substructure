@@ -3,7 +3,7 @@
 Each benchmark runs in its single-thread configuration, one after another so
 they never compete for CPU:
 
-- the in-process Python benchmarks as they are (01-03, 05, 05a, 05b);
+- the in-process Python benchmarks as they are (01-03, 05);
 - 04 with one worker process, and 06/07 with `RAYON_NUM_THREADS=1`;
   07's process-parallel backend is left out, since it is multi-core by design;
 - 08, 09 and 10 with `--threads 1`;
@@ -22,12 +22,12 @@ and written under `benchmarks/results/<timestamp>/`:
     results.jsonl   every report, as printed
     summary.csv     one row per report, standard fields and the screen counts
     summary.md      metadata, the main table, and the benchmark 09 sweep
-    metadata.json   machine, software versions, git commit, thread settings
+    metadata.json   machine, software versions, thread settings
     logs/           each benchmark's full output
 
 Usage:
     uv run benchmarks/run_all.py
-    uv run benchmarks/run_all.py --only 03 05a 08
+    uv run benchmarks/run_all.py --only 03 05 08
     uv run benchmarks/run_all.py --skip-postgres
 """
 
@@ -57,12 +57,10 @@ BENCHMARKS = [
         "Roaring scan, one worker process",
         [["benchmarks/04_roaring_multiprocessing.py", "--processes", "1"]],
     ),
-    ("05", "Roaring postings", [["benchmarks/05_roaring_postings.py"]]),
-    ("05a", "NumPy postings", [["benchmarks/05a_numpy_postings.py"]]),
     (
-        "05b",
-        "NumPy postings, Pattern vs path fp",
-        [["benchmarks/05b_numpy_path_fp.py"]],
+        "05",
+        "postings, Roaring and NumPy x Pattern and path fp",
+        [["benchmarks/05_postings.py"]],
     ),
     ("06", "NumPy vs Rust posting screen", [["benchmarks/06_rust_postings.py"]]),
     (
@@ -139,10 +137,6 @@ def metadata() -> dict:
     memsize = sysctl("hw.memsize")
     return {
         "date": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-        "git_commit": run(["git", "rev-parse", "HEAD"]),
-        "git_dirty": bool(
-            run(["git", "status", "--porcelain", "--untracked-files=no"])
-        ),
         "machine": {
             "cpu": sysctl("machdep.cpu.brand_string") or platform.processor(),
             "cores": os.cpu_count(),
@@ -211,8 +205,6 @@ def write_markdown(
         "# Single-thread benchmark run",
         "",
         f"- **Date:** {meta['date']}",
-        f"- **Commit:** `{meta['git_commit'][:12]}`"
-        + (" (with uncommitted changes)" if meta["git_dirty"] else ""),
         f"- **Machine:** {m['cpu']}, {m['cores']} cores, {m['memory_gib']} GiB, "
         f"{m['os']} ({m['arch']})",
         f"- **Software:** Python {meta['python']}, RDKit {pk['rdkit']}, "
@@ -271,7 +263,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="\n".join(__doc__.split("\n")[2:]),
     )
-    parser.add_argument("--only", nargs="+", metavar="KEY", help="e.g. 01 05a postgres")
+    parser.add_argument("--only", nargs="+", metavar="KEY", help="e.g. 01 05 postgres")
     parser.add_argument("--skip-postgres", action="store_true")
     parser.add_argument(
         "--out", type=Path, help="default: benchmarks/results/<timestamp>"

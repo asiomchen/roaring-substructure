@@ -24,6 +24,7 @@ dependencies = [
     "ruff>=0.16.8",
     "seaborn>=0.13.2",
     "tqdm>=4.70.1",
+    "scienceplots>=2.2.2",
 ]
 
 [dependency-groups]

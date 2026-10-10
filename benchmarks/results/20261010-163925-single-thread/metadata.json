@@ -1,7 +1,5 @@
 {
   "date": "2026-10-10T16:39:25+02:00",
-  "git_commit": "c78c4cd9febbd1f6d61d20aaa6c54b074438aa75",
-  "git_dirty": true,
   "machine": {
     "cpu": "Apple M4",
     "cores": 10,
