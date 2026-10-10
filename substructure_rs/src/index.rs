@@ -24,11 +24,8 @@ impl<const W: usize> Index<W> {
     const BITS: usize = 64 * W;
 
     pub fn build(kind: &FpKind, order: Order, queries: Vec<Query>) -> Self {
-        let n = queries.len();
-        let words = n.div_ceil(64);
-        let freq = LabelFreq::new(&queries);
-        let (fps, plans): (Vec<Fp<W>>, Vec<Plan>) =
-            queries.par_iter().map(|q| (query_fp(kind, q), Plan::with_order(q, order, &freq))).unzip();
+        let words = queries.len().div_ceil(64);
+        let fps: Vec<Fp<W>> = queries.par_iter().map(|q| query_fp(kind, q)).collect();
         let mut postings = vec![0u64; Self::BITS * words];
         let mut counts = vec![0usize; Self::BITS];
         for (idx, fp) in fps.iter().enumerate() {
@@ -44,11 +41,35 @@ impl<const W: usize> Index<W> {
         }
         let mut ranked_bits: Vec<u16> = (0..Self::BITS).map(|b| b as u16).collect();
         ranked_bits.sort_by(|&a, &b| counts[b as usize].cmp(&counts[a as usize]));
+        Self::from_parts(order, queries, fps, postings, ranked_bits).expect("consistent parts")
+    }
+
+    /// An index from its stored arrays (see `store.rs`) and the parsed queries;
+    /// plans the exact-match atom order again, which the arrays do not hold.
+    pub fn from_parts(
+        order: Order,
+        queries: Vec<Query>,
+        fps: Vec<Fp<W>>,
+        postings: Vec<u64>,
+        ranked_bits: Vec<u16>,
+    ) -> Result<Self, String> {
+        let n = queries.len();
+        let words = n.div_ceil(64);
+        if fps.len() != n || postings.len() != Self::BITS * words || ranked_bits.len() != Self::BITS {
+            return Err(format!("index arrays do not fit {n} queries at {} bits", Self::BITS));
+        }
+        let freq = LabelFreq::new(&queries);
+        let plans = queries.par_iter().map(|q| Plan::with_order(q, order, &freq)).collect();
         let mut all_ids = vec![u64::MAX; words];
         if n % 64 != 0 {
             all_ids[words - 1] = (1u64 << (n % 64)) - 1;
         }
-        Index { queries, plans, fps, postings, words, ranked_bits, all_ids }
+        Ok(Index { queries, plans, fps, postings, words, ranked_bits, all_ids })
+    }
+
+    /// The arrays `from_parts` takes: query fingerprints, postings, ranked bits.
+    pub fn parts(&self) -> (&[Fp<W>], &[u64], &[u16]) {
+        (&self.fps, &self.postings, &self.ranked_bits)
     }
 
     pub fn nbytes(&self) -> usize {

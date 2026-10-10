@@ -20,6 +20,7 @@ mod mol;
 mod periodic;
 mod rings;
 mod smarts;
+pub mod store;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "python")]

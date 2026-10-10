@@ -293,3 +293,45 @@ fn fingerprints_do_not_depend_on_atom_order() {
         }
     }
 }
+
+// ------------------------------------------------------------ index on disk
+
+#[test]
+fn saved_index_loads_and_matches_the_same() {
+    use crate::store::{Queries, StoredIndex};
+    use crate::Screen;
+
+    let smarts = ["[CH3]", "c1ccccc1", "C(=O)[OH]", "[N+](=O)[O-]", "[Cl]", "C#N"];
+    let smiles = ["Cc1ccccc1", "CC(=O)O", "O=[N+]([O-])c1ccccc1Cl", "CCCC", "N#CC"];
+    let queries = Queries::parse(smarts.iter().map(|s| s.to_string()).collect()).unwrap();
+    let built = StoredIndex::build(queries, "paths4+branches", 2048, "rare-root").unwrap();
+    let path = std::env::temp_dir().join(format!("substructure_rs_test_{}.idx", std::process::id()));
+    built.save(&path).unwrap();
+    let loaded = StoredIndex::load(&path);
+    std::fs::remove_file(&path).unwrap();
+    let loaded = loaded.unwrap();
+
+    assert_eq!((loaded.queries(), loaded.fp_kind(), loaded.fp_bits()), (6, "paths4+branches", 2048));
+    assert_eq!(loaded.nbytes(), built.nbytes());
+    let targets = Screen::targets(&smiles.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+    let found = |index: &StoredIndex| -> Vec<Vec<u32>> {
+        index.match_many(&targets, 128).unwrap().into_iter().map(|f| f.found).collect()
+    };
+    assert_eq!(found(&loaded), found(&built));
+    assert_eq!(found(&loaded), vec![vec![0, 1], vec![0, 2], vec![1, 3, 4], vec![0], vec![0, 5]]);
+}
+
+#[test]
+fn truncated_index_is_an_error() {
+    use crate::store::{Queries, StoredIndex};
+
+    let queries = Queries::parse(vec!["CC".into(), "c1ccccc1".into()]).unwrap();
+    let index = StoredIndex::build(queries, "paths4", 512, "rare-root").unwrap();
+    let path = std::env::temp_dir().join(format!("substructure_rs_trunc_{}.idx", std::process::id()));
+    index.save(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+    let loaded = StoredIndex::load(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert!(loaded.is_err());
+}
