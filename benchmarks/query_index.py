@@ -40,6 +40,26 @@ class SubstructureQueryIndex(Mapping[int, BitMap]):
     def __len__(self) -> int:
         return len(self.postings)
 
+    def screen(
+        self, reactant_mol: Mol, posting_limit: int = 128
+    ) -> tuple[BitMap, list[int]]:
+        """IDs left after the posting filter, and after the full fingerprint check.
+
+        The same steps as `match`, stopping before the exact match; for counting.
+        """
+        reactant_fp = pattern(reactant_mol)
+        excluded = BitMap()
+        selected = 0
+        for bit in self:
+            if bit not in reactant_fp:
+                excluded |= self[bit]
+                selected += 1
+                if selected == posting_limit:
+                    break
+        remaining = self.all_ids - excluded
+        screened = [i for i in remaining if self.query_fps[i].issubset(reactant_fp)]
+        return remaining, screened
+
     def match(self, reactant_mol: Mol, posting_limit: int = 128) -> list[Mol]:
         """Return the indexed query molecules matching one reactant."""
         if not 1 <= posting_limit <= len(self):

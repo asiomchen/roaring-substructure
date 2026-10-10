@@ -18,9 +18,15 @@ To check the result against RDKit, create a reference with
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import substructure_rs
+
+root = str(Path(__file__).resolve().parents[1])
+if root not in sys.path:
+    sys.path.insert(0, root)
+from benchmarks.report import from_substructure_rs, print_report
 
 
 def main() -> None:
@@ -39,7 +45,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        substructure_rs.run(
+        result = substructure_rs.run(
             queries_file=args.queries_file,
             reactants_file=args.reactants_file,
             postings=args.postings,
@@ -47,10 +53,10 @@ def main() -> None:
             threads=args.threads,
             reference=args.reference,
             dump_atoms=args.dump_atoms,
-            print_report=True,
         )
     except ValueError as error:
         parser.exit(1, f"error: {error}\n")
+    print_report(from_substructure_rs(result, "08_rust_native"))
 
 
 if __name__ == "__main__":

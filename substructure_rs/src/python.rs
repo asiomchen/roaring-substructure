@@ -21,9 +21,8 @@ fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>>
     d.set_item("fp_kind", &r.fp_kind)?;
     d.set_item("fp_bits", r.fp_bits)?;
     d.set_item("order", &r.order)?;
-    d.set_item("read_seconds", r.read_seconds)?;
-    d.set_item("parse_queries_seconds", r.parse_queries_seconds)?;
-    d.set_item("parse_reactants_seconds", r.parse_reactants_seconds)?;
+    d.set_item("query_prep_seconds", r.query_prep_seconds)?;
+    d.set_item("reactant_prep_seconds", r.reactant_prep_seconds)?;
     d.set_item("build_seconds", r.build_seconds)?;
     d.set_item("match_seconds", r.match_seconds.clone())?;
     d.set_item("match_median_seconds", r.match_median())?;

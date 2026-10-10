@@ -22,9 +22,11 @@ The kinds (see `substructure_rs/src/fingerprint.rs`):
 Sizes default to 512-8192 bits. `paths4` at 4096 bits is benchmark 08.
 Candidates, the pairs that survive the screen, measure the fingerprint
 independently of the machine; the matching time is what the screen is for. Use `--threads 1` for steadier timings.
-The last four columns split matching into reactant fingerprints, the posting
-filter, the full fingerprint check and exact matching, in milliseconds summed
-over threads.
+Each configuration is one row of the standard benchmark table (see
+`benchmarks/report.py`); the last columns split matching into reactant
+fingerprints, the posting filter, the full fingerprint check and exact matching,
+as CPU time summed over threads. The fastest configuration is then printed in
+full.
 
     uv run benchmarks/09_rust_native_fp.py
     uv run benchmarks/09_rust_native_fp.py --kinds paths4 paths4+cycles --bits 2048 8192
@@ -38,9 +40,15 @@ start from the query atom whose label is rarest).
 import argparse
 import csv
 import itertools
+import sys
 from pathlib import Path
 
 import substructure_rs
+
+root = str(Path(__file__).resolve().parents[1])
+if root not in sys.path:
+    sys.path.insert(0, root)
+from benchmarks.report import Table, from_substructure_rs, print_report, record
 
 COLUMNS = [
     "fp_kind",
@@ -99,13 +107,19 @@ def main() -> None:
             parser.error(f"unsupported size {bits}; choose from {substructure_rs.FP_SIZES}")
 
     rows = []
-    header = (
-        f"{'kind':<24}{'bits':>6}{'post':>5}{'order':>10}{'q set':>7}{'r set':>7}"
-        f"{'build s':>9}{'MiB':>7}{'posted':>10}{'candidates':>12}{'matches':>9}"
-        f"{'match ms':>10} |{'fp':>6}{'post':>6}{'check':>6}{'exact':>6}"
+    reports = []
+    table = Table(
+        [
+            "exact matches run",
+            "reactant fps",
+            "posting filter",
+            "fp check",
+            "exact match",
+            "index size",
+        ],
+        name_width=48,
     )
-    print(header)
-    print("-" * len(header))
+    table.header()
     for kind in args.kinds:
         for bits in args.bits:
             for postings, order in itertools.product(args.postings, args.orders):
@@ -141,15 +155,12 @@ def main() -> None:
                     "digest": r["digest"],
                 }
                 rows.append(row)
-                print(
-                    f"{kind:<24}{bits:>6}{postings:>5}{order:>10}"
-                    f"{100 * row['query_density']:>6.1f}%{100 * row['target_density']:>6.1f}%"
-                    f"{row['build_seconds']:>9.3f}{row['index_mib']:>7.1f}"
-                    f"{row['posted']:>10}{row['candidates']:>12}{row['matches']:>9}"
-                    f"{1000 * row['match_median_seconds']:>10.1f} |"
-                    + "".join(f"{1000 * row[p]:>6.0f}" for p in PHASES),
-                    flush=True,
+                report = from_substructure_rs(
+                    r, "09_rust_native_fp", f"{kind} {bits} p{postings} {order}"
                 )
+                reports.append(report)
+                record(report)
+                table.row(report)
                 comparison = r.get("comparison")
                 if comparison and (comparison["missing"] or comparison["extra"]):
                     print(
@@ -157,9 +168,11 @@ def main() -> None:
                         f"extra {comparison['extra']}"
                     )
 
+    print()
+    print_report(min(reports, key=lambda report: report.match_median), record_it=False)
     digests = {row["digest"] for row in rows}
     if len(digests) == 1:
-        print(f"\nall {len(rows)} configurations agree; digest {digests.pop()}")
+        print(f"all {len(rows)} configurations agree; digest {digests.pop()}")
     else:
         print("\nconfigurations DISAGREE on the match set:")
         for row in rows:

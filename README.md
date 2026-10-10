@@ -19,6 +19,7 @@ Roaring bitmaps in Merck’s Synthia retrosynthesis software.
 - [In process](#in-process)
   - [Reusable Roaring index](#reusable-roaring-index)
   - [Benchmark 5a: NumPy packed bitmaps](#benchmark-5a-numpy-packed-bitmaps)
+  - [Benchmark 5b: benchmark 08’s fingerprint in the NumPy index](#benchmark-5b-benchmark-08s-fingerprint-in-the-numpy-index)
 - [In Rust](#in-rust)
   - [Benchmarks 06-08](#benchmarks-06-08)
   - [Benchmark 9: fingerprint kinds and sizes in the Rust pipeline](#benchmark-9-fingerprint-kinds-and-sizes-in-the-rust-pipeline)
@@ -28,6 +29,7 @@ Roaring bitmaps in Merck’s Synthia retrosynthesis software.
 - [Method](#method)
 - [Things worth knowing before copying any of this](#things-worth-knowing-before-copying-any-of-this)
 - [Reproducing](#reproducing)
+  - [Benchmark output](#benchmark-output)
   - [Rebuild the dataset](#rebuild-the-dataset)
 
 ## The task
@@ -224,6 +226,29 @@ SMARTS from the inner loop — fetching two elements per pair instead of three, 
 looking the label up only on the 0.055% of pairs that match — measured 5.88 s against
 5.82 s, below the noise.
 
+### Benchmark 5b: benchmark 08’s fingerprint in the NumPy index
+
+`05b_numpy_path_fp.py` keeps benchmark 5a’s NumPy index, postings and RDKit exact match,
+and changes only the screening fingerprint.
+`benchmarks/rdkit_path_fp.py` computes benchmark 08’s `paths4` fingerprint (labelled
+atoms and paths of up to 4 bonds, counted up to 4 times, 4096 bits) from the RDKit
+molecules in Python.
+Like the Rust version, a query only hashes labels its SMARTS states, so `[C&H2&D2&+0]`
+contributes its H count, degree and charge, where the Pattern fingerprint keeps only the
+element. One run, three matching runs each:
+
+| fingerprint | bits | index build | posted | candidates | reactant fps | median match |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| RDKit Pattern (5a) | 2048 | 4.75 s | 943,741 | 350,393 | 0.14 s | 1.233 s |
+| benchmark 08 paths | 4096 | 15.48 s | 411,072 | 90,664 | 0.52 s | **0.976 s** |
+
+Both return the same 27,723 matches and digest.
+The path fingerprint sends 3.9x fewer pairs to `HasSubstructMatch` (90,664 against
+Rust’s 90,417 for the same kind, the difference being hash collisions), which saves more
+than its Python cost: matching is 21% faster even though each reactant fingerprint takes
+0.5 ms rather than 0.14 ms.
+The index build is 3x slower, all of it Python fingerprinting of the 50,000 queries.
+
 ## In Rust
 
 ### Benchmarks 06-08
@@ -371,8 +396,10 @@ toolkit with its own SMILES parser, SMARTS parser and VF2 matcher (`chematic-smi
 `chematic_bench` crate, in two modes.
 `naive` checks every pair with `has_match_with_config`, like `01` does with RDKit.
 `screened` lets `substructure_rs`’s screen (`paths4+branches`, 2048 bits) pick the
-candidates outside the timer and has chematic check only those, so the timer measures
-chematic’s matcher on the pairs benchmark 08’s own matcher sees.
+candidates and has chematic check only those, the pairs benchmark 08’s own matcher sees.
+It is timed like the other benchmarks: the screen’s index is built once as index prep,
+and each matching run screens every reactant and runs the exact matches; chematic’s
+exact match is also reported on its own.
 chematic cannot screen this workload itself: its Pattern fingerprint, a port of RDKit’s,
 covers concrete molecules only, not SMARTS queries.
 
@@ -392,8 +419,10 @@ On the screened pairs, which are the hard ones (a third match, the rest nearly d
 spends about 1.8 µs per pair against about 0.2 µs for `substructure_rs`’s specialised
 matcher, so as a drop-in exact matcher behind this screen it would take matching from
 about 50 to about 180 ms.
-Its value here is as an independent, RDKit-equivalent check of `substructure_rs`’s
-parsing and matching, which it confirms on all 50M pairs.
+Timed as a whole like the other benchmarks (screen plus exact match, one thread, Apple
+M4), `screened` matching takes 0.161 s, of which chematic’s exact match is 0.130 s. Its
+value here is as an independent, RDKit-equivalent check of `substructure_rs`’s parsing
+and matching, which it confirms on all 50M pairs.
 
 ## In PostgreSQL
 
@@ -537,9 +566,9 @@ JIT is enabled but likewise never triggers — the query costs ~213 against a
 All numbers are wall clock on the same machine (Apple M4, 10 cores, 24 GB, macOS 27;
 Python 3.13.14, RDKit 2026.03.6). Both sides time only the search: the 50,000
 substructure fingerprints and the index build happen outside the timer, while each
-query’s own fingerprint is inside it — the in-process scripts report it as
-`Matching took N seconds.` The database figure includes 1,000 client round trips and
-per-query planning that the in-process runs do not have.
+query’s own fingerprint is inside it — the `matching` line of each report.
+The database figure includes 1,000 client round trips and per-query planning that the
+in-process runs do not have.
 Server settings are pinned in `compose.yaml` so the answers can agree with Python’s
 defaults: `rdkit.sss_fp_size=2048` (baked into the index signature),
 `rdkit.do_chiral_sss=off` and `do_enhanced_stereo_sss=off` (Python’s `HasSubstructMatch`
@@ -584,6 +613,7 @@ uv run benchmarks/03_roaring_approach.py
 uv run benchmarks/04_roaring_multiprocessing.py --processes 10   # not in the article
 uv run benchmarks/05_roaring_postings.py
 uv run benchmarks/05a_numpy_postings.py
+uv run benchmarks/05b_numpy_path_fp.py
 
 # Rust benchmarks on one core, one after another
 RAYON_NUM_THREADS=1 uv run benchmarks/06_rust_postings.py
@@ -608,6 +638,19 @@ example `SSS_FP_SIZE=4096 ... --phase setup` restarts the server with a 4096-bit
 Phases share the database through the compose volume; `verify` needs no database at all.
 Match sets and query plans land in `benchmarks/postgres/artifacts/`, which is
 gitignored.
+
+### Benchmark output
+
+Every benchmark prints the same report (`benchmarks/report.py`): settings, then query
+prep, index prep and reactant prep (each outside the matching timer, `-` when a
+benchmark has no such step), matching (median and every run), end to end (prep plus
+median matching), and the matches with a digest.
+The digest is SHA-256 over the sorted (reactant index, query index) pairs, so every
+benchmark that finds the same matches prints the same `72f6936d…`. A benchmark-specific
+section follows: how many pairs the postings and the fingerprint check drop and how many
+reach the exact match, and where measured, phase times, index sizes and memory.
+Benchmarks that compare variants (05a, 05b, 06, 07, 09) end with one table row per
+variant in the same columns.
 
 ### Rebuild the dataset
 

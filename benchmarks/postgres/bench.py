@@ -49,6 +49,7 @@ Usage:
 
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -63,6 +64,9 @@ import pandas as pd
 import psycopg
 from rdkit import RDLogger
 from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from benchmarks.report import Report, digest_pairs, print_report  # noqa: E402
 
 warnings.filterwarnings("ignore")
 RDLogger.DisableLog("rdApp.*")
@@ -124,6 +128,20 @@ def normalized(column):
 
 
 # --------------------------------------------------------------------------- phases
+
+
+def save_phase_seconds(phase, seconds):
+    """Keep a phase's time, so `match` can report load and index build as its prep."""
+    ARTIFACTS.mkdir(exist_ok=True)
+    path = ARTIFACTS / "phase_seconds.json"
+    saved = json.loads(path.read_text()) if path.exists() else {}
+    saved[phase] = seconds
+    path.write_text(json.dumps(saved))
+
+
+def load_phase_seconds():
+    path = ARTIFACTS / "phase_seconds.json"
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 def phase_setup(_args):
@@ -247,6 +265,7 @@ def phase_load(args):
         cur.execute("DROP TABLE sub_staging")
     elapsed = time.time() - start
 
+    save_phase_seconds("load", elapsed)
     print(f"Load took {elapsed} seconds.")
     print(
         f"  stored       : {loaded:,} queries, {mangled} not matching the SMARTS loaded"
@@ -273,6 +292,7 @@ def phase_index(_args):
         index_size, heap_size, total_size = cur.fetchone()
     elapsed = time.time() - start
 
+    save_phase_seconds("index", elapsed)
     print(f"Index build took {elapsed} seconds.")
     print(f"  index        : {index_size} ({INDEX_NAME})")
     print(f"  heap         : {heap_size} (substructures, {total_size} with indexes)")
@@ -334,7 +354,9 @@ def match_concurrent(smiles_list, connections, args):
 
 
 def phase_match(args):
+    start = time.perf_counter()
     smiles_list = pd.read_csv(REACTANTS_CSV)["smiles"]
+    reactant_prep = time.perf_counter() - start
     n = len(smiles_list)
     connections = max(1, args.connections)
 
@@ -378,10 +400,37 @@ def phase_match(args):
         f"-- {MATCH_SQL}  -- idx = {median_idx} ({counts[median_idx]} hits)\n\n{plan}\n"
     )
 
-    label = f" ({connections} connections)" if connections > 1 else ""
-    print(f"Matching took {elapsed} seconds{label}.")
-    print(f"  matches      : {len(matches):,} over {n:,} reactants")
-    print("  plan         : artifacts/explain.txt")
+    prep = load_phase_seconds()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM substructures")
+        (queries,) = cur.fetchone()
+        cur.execute("SELECT current_setting('rdkit.sss_fp_size')")
+        (fp_size,) = cur.fetchone()
+    print_report(
+        Report(
+            benchmark="postgres",
+            variant=f"PostgreSQL {os.environ.get('PG_MAJOR', '18')}",
+            queries=queries,
+            reactants=n,
+            match_seconds=[elapsed],
+            matches=len(matches),
+            digest=digest_pairs(matches),
+            query_prep_seconds=prep.get("load"),
+            index_prep_seconds=prep.get("index"),
+            reactant_prep_seconds=reactant_prep,
+            settings={"connections": connections, "sss_fp_size": fp_size},
+            notes={
+                "query": "--phase load: read SMARTS, COPY, convert to qmol",
+                "index": "--phase index: GiST index build",
+                "reactant": "read SMILES; each is parsed by the server per query",
+                "matching": "1,000 queries, Pattern fingerprint GiST screen + recheck",
+            },
+            extras=[
+                ("warm-up", min(WARMUP_REACTANTS, n), "reactants run before the timer"),
+                ("plan", "explain.txt", "EXPLAIN of the median reactant, in artifacts/"),
+            ],
+        )
+    )
     if INDEX_NAME not in plan:
         print(
             f"  ! the plan does not mention {INDEX_NAME} -- this phase may have "
