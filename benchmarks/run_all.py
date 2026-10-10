@@ -6,7 +6,8 @@ they never compete for CPU:
 - the in-process Python benchmarks as they are (01-03, 05);
 - 04 with one worker process, and 06/07 with `RAYON_NUM_THREADS=1`;
   07's process-parallel backend is left out, since it is multi-core by design;
-- 08, 09 and 10 with `--threads 1`;
+- 08, 09, 10 and 11 with `--threads 1`; 11 drops the OS file cache, so run
+  `sudo -v` first;
 - PostgreSQL over one connection, with parallel workers off (as `compose.yaml`
   pins them): setup, load, index, match, verify. The server is stopped afterwards,
   not removed; its volume is kept.
@@ -81,6 +82,11 @@ BENCHMARKS = [
             ["benchmarks/10_chematic.py", "--mode", "naive", "--threads", "1"],
             ["benchmarks/10_chematic.py", "--mode", "screened", "--threads", "1"],
         ],
+    ),
+    (
+        "11",
+        "index saved to disk and loaded, Python and Rust",
+        [["benchmarks/11_index_on_disk.py", "--threads", "1"]],
     ),
     (
         "postgres",

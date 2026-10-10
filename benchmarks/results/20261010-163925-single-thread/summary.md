@@ -25,6 +25,9 @@ Times are seconds. Prep steps are outside the matching timer; matching is the me
 | 08_rust_native |  | 0.1760 | 0.4266 | 0.0102 | **0.0566** | 0.6695 | 27,723 | 90,417 |
 | 10_chematic | naive | 0.1167 | - | 0.0019 | **19.7089** | 19.8274 | 27,723 | 50,000,000 |
 | 10_chematic | screened | 0.0940 | 0.5857 | 0.0122 | **0.1599** | 0.8518 | 27,723 | 82,461 |
+| 11_index_on_disk | numpy-pattern | 0.7512 | 4.8399 | 0.3128 | **1.2221** | 7.1260 | 27,723 | 350,393 |
+| 11_index_on_disk | numpy-paths | 0.6702 | 15.4583 | 0.3113 | **0.9707** | 17.4105 | 27,723 | 90,664 |
+| 11_index_on_disk | rust-paths4-branches | 0.1774 | 0.4265 | 0.0105 | **0.0482** | 0.6626 | 27,723 | 82,461 |
 | postgres | PostgreSQL 18 | 3.6088 | 4.6567 | 0.0014 | **8.5959** | 16.8628 | 27,723 | - |
 
 Settings per report:
@@ -43,6 +46,9 @@ Settings per report:
 - 08_rust_native: fp paths4 4096 bits; postings 128; order rare-root; threads 1; runs 3
 - 10_chematic (naive): mode naive; threads 1; runs 3
 - 10_chematic (screened): mode screened; threads 1; runs 3; screen paths4+branches 2048 bits, 128 postings
+- 11_index_on_disk (numpy-pattern): language Python; postings 128; runs 3; threads 1; file cache dropped before search
+- 11_index_on_disk (numpy-paths): language Python; postings 128; runs 3; threads 1; file cache dropped before search
+- 11_index_on_disk (rust-paths4-branches): language Rust; postings 128; runs 3; threads 1; file cache dropped before search
 - postgres (PostgreSQL 18): connections 1; sss_fp_size 2048
 
 ## Benchmark 09 sweep (50 configurations, fastest first)
