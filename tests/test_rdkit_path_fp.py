@@ -8,7 +8,7 @@ from rdkit import Chem
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarks.numpy_query_index import NumpySubstructureQueryIndex
-from benchmarks.rdkit_path_fp import path_fingerprint
+from benchmarks.rdkit_path_fp import _query_atom, path_fingerprint
 
 QUERIES = [
     "c1ccccc1",
@@ -63,6 +63,51 @@ class PathFingerprintTest(unittest.TestCase):
         self.assertFalse(
             set(path_fingerprint(query)) <= set(path_fingerprint(methanol))
         )
+
+    def test_query_labels_only_include_unconditional_equalities(self):
+        # Compare with the constraints the parser can safely retain. This checks
+        # both skipping an unsupported subtree and resuming at its next sibling.
+        cases = [
+            ("[C;D2,D3;H2]", "[C;H2]"),
+            ("[C,N;D2;H2]", "[*;D2;H2]"),
+            ("[C;!D2;H3]", "[C;H3]"),
+            ("[C;!$(CO);H3]", "[C;H3]"),
+            ("[!C;#7;H2]", "[#7;H2]"),
+            ("[C;D{2-4};H2]", "[C;H2]"),
+            ("[C;D{2-};H2]", "[C;H2]"),
+            ("[C;D{2-4};D2;H2;+0]", "[C;D2;H2;+0]"),
+        ]
+        for smarts, retained in cases:
+            with self.subTest(smarts=smarts):
+                query = Chem.MolFromSmarts(smarts)
+                expected = Chem.MolFromSmarts(retained)
+                self.assertEqual(
+                    _query_atom(query.GetAtomWithIdx(0)),
+                    _query_atom(expected.GetAtomWithIdx(0)),
+                )
+
+    def test_complex_constraints_never_reject_known_matches(self):
+        cases = [
+            ("[C;D2,D3;H2]", "CCO", False),
+            ("[C,N;D2;H2]", "CCO", False),
+            ("[C;!D2;H3]", "CCO", False),
+            ("[C;!$(CO);H3]", "CCO", False),
+            ("[!C;#7;H2]", "CN", False),
+            ("[C;D{2-4};H2]", "CCO", False),
+            ("[C;D{2-};H2]", "CCO", False),
+            ("[C;D{2-4};D2;H2;+0]", "CCO", False),
+            ("[C;D4;H2;+0]-[O;H1]", "CCO", True),
+        ]
+        for smarts, smiles, explicit_hs in cases:
+            with self.subTest(smarts=smarts, explicit_hs=explicit_hs):
+                query = Chem.MolFromSmarts(smarts)
+                target = Chem.MolFromSmiles(smiles)
+                if explicit_hs:
+                    target = Chem.AddHs(target)
+                self.assertTrue(target.HasSubstructMatch(query))
+                self.assertLessEqual(
+                    set(path_fingerprint(query)), set(path_fingerprint(target))
+                )
 
     def test_does_not_depend_on_atom_order(self):
         for a, b in [("OCC(=O)N", "NC(=O)CO"), ("c1ccncc1C(=O)O", "OC(=O)c1cccnc1")]:
