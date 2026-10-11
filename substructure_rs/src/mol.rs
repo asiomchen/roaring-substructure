@@ -21,6 +21,12 @@ pub enum BondType {
 }
 
 impl BondType {
+    /// Position in the declaration order, for bond-query bitmasks.
+    #[inline]
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+
     /// Doubled bond order, so aromatic bonds stay integral.
     fn order2(self) -> i32 {
         match self {
@@ -45,6 +51,10 @@ pub struct Atom {
     pub implicit_h: u8,
     pub radicals: u8,
     explicit_valence: i32,
+    /// Number of rings in the symmetrized SSSR that contain the atom (RDKit's `numAtomRings`).
+    pub n_rings: u8,
+    /// Size of the smallest of those rings; 0 when the atom is in none.
+    pub min_ring: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +65,8 @@ pub struct Bond {
     pub aromatic: bool,
     /// Written with `/` or `\\` in the SMILES.
     pub directional: bool,
+    /// In at least one ring of the symmetrized SSSR.
+    pub in_ring: bool,
 }
 
 /// A sanitized molecule, ready for matching.
@@ -71,15 +83,37 @@ pub struct Mol {
 pub struct TargetAtom {
     pub z: u8,
     pub aromatic: bool,
+    /// `H`: explicit + implicit + `[H]` neighbours (RDKit `getTotalNumHs(true)`).
     pub total_h: u8,
     pub degree: u8,
     pub charge: i8,
+    pub isotope: u16,
+    /// `h`: explicit + implicit Hs, not counting `[H]` neighbours (`getTotalNumHs(false)`).
+    pub implicit_h: u8,
+    /// `v`: total valence (explicit + implicit).
+    pub valence: u8,
+    /// `X`: total connections, degree plus `h` (`getTotalDegree`).
+    pub connections: u8,
+    /// `z`: neighbours that are neither C nor H.
+    pub hetero_nbrs: u8,
+    /// `Z`: non-aromatic neighbours that are neither C nor H.
+    pub aliphatic_hetero_nbrs: u8,
+    /// `R`: SSSR rings containing the atom.
+    pub rings: u8,
+    /// `r`: size of the smallest SSSR ring containing the atom, 0 if none.
+    pub ring_size: u8,
+    /// `x`: ring bonds on the atom.
+    pub ring_bonds: u8,
 }
+
+/// Largest value a counted property takes in a `TargetAtom`. Query numbers
+/// saturate at `u8::MAX`, so a query asking for more than this never matches.
+pub const PROP_MAX: usize = 254;
 
 impl Mol {
     fn add_bond(&mut self, a: usize, b: usize, kind: BondType, aromatic: bool, directional: bool) {
         let idx = self.bonds.len();
-        self.bonds.push(Bond { a, b, kind, aromatic, directional });
+        self.bonds.push(Bond { a, b, kind, aromatic, directional, in_ring: false });
         self.nbrs[a].push((b, idx));
         self.nbrs[b].push((a, idx));
     }
@@ -104,19 +138,54 @@ impl Mol {
     }
 
     pub fn target_atoms(&self) -> Vec<TargetAtom> {
+        let cap = |n: usize| n.min(PROP_MAX) as u8;
         (0..self.atoms.len())
             .map(|i| {
                 let a = &self.atoms[i];
-                let h_nbrs = self.nbrs[i].iter().filter(|&&(n, _)| self.atoms[n].z == 1).count();
+                let nbrs = &self.nbrs[i];
+                let h_nbrs = nbrs.iter().filter(|&&(n, _)| self.atoms[n].z == 1).count();
+                let hetero = |aliphatic_only: bool| {
+                    nbrs.iter()
+                        .filter(|&&(n, _)| {
+                            let n = &self.atoms[n];
+                            n.z != 6 && n.z != 1 && !(aliphatic_only && n.aromatic)
+                        })
+                        .count()
+                };
+                let h = a.explicit_h as usize + a.implicit_h as usize;
                 TargetAtom {
                     z: a.z,
                     aromatic: a.aromatic,
-                    total_h: a.explicit_h + a.implicit_h + h_nbrs as u8,
-                    degree: self.degree(i) as u8,
+                    total_h: cap(h + h_nbrs),
+                    degree: cap(nbrs.len()),
                     charge: a.charge,
+                    isotope: a.isotope,
+                    implicit_h: cap(h),
+                    valence: cap(self.total_valence(i).max(0) as usize),
+                    connections: cap(nbrs.len() + h),
+                    hetero_nbrs: cap(hetero(false)),
+                    aliphatic_hetero_nbrs: cap(hetero(true)),
+                    rings: a.n_rings,
+                    ring_size: a.min_ring,
+                    ring_bonds: cap(nbrs.iter().filter(|&&(_, b)| self.bonds[b].in_ring).count()),
                 }
             })
             .collect()
+    }
+
+    /// Record the SSSR on the atoms and bonds, where `remove_hs` carries it along.
+    fn store_rings(&mut self, rings: &Rings) {
+        for r in &rings.atom_rings {
+            for &i in r {
+                let a = &mut self.atoms[i];
+                a.n_rings = (a.n_rings + 1).min(PROP_MAX as u8);
+                let size = r.len().min(PROP_MAX) as u8;
+                a.min_ring = if a.min_ring == 0 { size } else { a.min_ring.min(size) };
+            }
+        }
+        for (b, &in_ring) in self.bonds.iter_mut().zip(&rings.bond_in_ring) {
+            b.in_ring = in_ring;
+        }
     }
 
     // ---------------------------------------------------------------- valence
@@ -782,6 +851,7 @@ impl Mol {
         for b in old_bonds {
             if new_idx[b.a] != usize::MAX && new_idx[b.b] != usize::MAX {
                 self.add_bond(new_idx[b.a], new_idx[b.b], b.kind, b.aromatic, b.directional);
+                self.bonds.last_mut().unwrap().in_ring = b.in_ring;
             }
         }
     }
@@ -791,6 +861,7 @@ impl Mol {
         self.clean_up();
         self.update_property_cache();
         let rings = symmetrized_sssr(self);
+        self.store_rings(&rings);
         self.kekulize()?;
         self.assign_radicals();
         self.set_aromaticity(&rings);
@@ -1085,6 +1156,8 @@ fn new_atom(z: u8, aromatic: bool) -> Atom {
         implicit_h: 0,
         radicals: 0,
         explicit_valence: 0,
+        n_rings: 0,
+        min_ring: 0,
     }
 }
 

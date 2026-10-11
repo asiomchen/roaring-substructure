@@ -17,7 +17,8 @@ is what a service holding the index needs. The index file's size is reported.
 Variants (`--variant`, any of them; all by default):
 
     numpy-pattern         NumPy posting lists, RDKit Pattern fp, RDKit match
-    numpy-paths           NumPy posting lists, path fp in Python, RDKit match
+    numpy-paths           NumPy posting lists, path fp in Python at 2048 bits
+                          (benchmark 05 uses 4096), RDKit match
     rust-paths4-branches  all in Rust (`substructure_rs`), paths4+branches fp at
                           2048 bits, the fastest configuration of benchmark 09
 
@@ -83,17 +84,18 @@ class NumpyVariant:
     language = "Python"
     suffix = ".pkl"
 
-    def __init__(self, fp_name: str):
+    def __init__(self, fp_name: str, fp_size: int | None = None):
         self.fp_name = fp_name
+        self.fp_size = fp_size  # None: the fingerprint module's FP_SIZE
 
     def fingerprint(self):
         if self.fp_name == "pattern":
             from benchmarks.query_index import FP_SIZE, pattern_bits
 
-            return pattern_bits, FP_SIZE, "RDKit Pattern fp"
+            return pattern_bits, self.fp_size or FP_SIZE, "RDKit Pattern fp"
         from benchmarks.rdkit_path_fp import FP_SIZE, path_fingerprint
 
-        return path_fingerprint, FP_SIZE, "path fp (Python)"
+        return path_fingerprint, self.fp_size or FP_SIZE, "path fp (Python)"
 
     def describe(self) -> str:
         _, fp_size, name = self.fingerprint()
@@ -201,7 +203,7 @@ class RustVariant:
 
 VARIANTS = {
     "numpy-pattern": NumpyVariant("pattern"),
-    "numpy-paths": NumpyVariant("paths"),
+    "numpy-paths": NumpyVariant("paths", 2048),
     "rust-paths4-branches": RustVariant("paths4+branches", 2048),
 }
 

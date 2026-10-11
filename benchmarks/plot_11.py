@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -162,11 +163,16 @@ def stacked(ax, labels: list[str], title: str, unit: str, fmt, segs) -> None:
         )
 
 
+def fp_bits(report: dict) -> int:
+    """The fingerprint size, from the index note ("... at 2048 bits ...")."""
+    return int(re.search(r"at (\d+) bits", report["notes"]["index"])[1])
+
+
 def plot(run: Run) -> None:
     # Reversed: barh draws the first row at the bottom, and the shared y axis
     # cannot be inverted per panel.
     reports = run.select([(BENCHMARK, name) for name in VARIANTS])[::-1]
-    labels = list(VARIANTS.values())[::-1]
+    labels = [f"{VARIANTS[r['variant']]}, {fp_bits(r):,} bits" for r in reports]
     first = reports[0]
     with figure(
         run.path / "plots",
@@ -187,8 +193,7 @@ def plot(run: Run) -> None:
         footer(
             fig,
             f"{run.machine}; all variants return {first['matches']:,} matches; "
-            "build and search run in separate processes; the OS file cache is "
-            "dropped before each search",
+            "build and search run in separate processes",
         )
         fig.tight_layout(rect=(0, 0.03, 1, 1))
 

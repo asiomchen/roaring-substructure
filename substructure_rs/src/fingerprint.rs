@@ -150,14 +150,16 @@ impl BondLabels {
         BondLabels { class: Some(class), exact: Some(bond_code(kind)) }
     }
 
+    /// What every target bond that passes `q` shares. Only a query that
+    /// accepts a single kind (any ring state), or exactly single and aromatic,
+    /// pins a label; every other expression leaves both open, so the
+    /// fingerprint never rejects a bond that matches.
     fn query(q: BondQuery) -> Self {
-        let (class, exact) = match q {
-            BondQuery::Single => (Some(1), Some(bond_code(BondType::Single))),
-            BondQuery::Aromatic => (Some(1), Some(bond_code(BondType::Aromatic))),
-            BondQuery::SingleOrAromatic => (Some(1), None),
-            BondQuery::Double => (Some(2), Some(2)),
-            BondQuery::Triple => (Some(3), Some(3)),
-            BondQuery::Any => (None, None),
+        let mut kinds = q.kinds();
+        let (class, exact) = match (kinds.next(), kinds.next(), kinds.next()) {
+            (Some(k), None, _) => (Some(BondLabels::target(k).class.unwrap()), Some(bond_code(k))),
+            (Some(BondType::Single), Some(BondType::Aromatic), None) => (Some(1), None),
+            _ => (None, None),
         };
         BondLabels { class, exact }
     }
@@ -519,7 +521,7 @@ impl Scratch {
     fn load_target(&mut self, t: &Target) {
         self.atoms.clear();
         self.atoms.extend(t.atoms.iter().map(AtomLabels::target));
-        self.nbrs.fill(t.nbrs.iter().map(|ns| ns.iter().map(|&(n, k)| (n as usize, BondLabels::target(k)))));
+        self.nbrs.fill(t.nbrs.iter().map(|ns| ns.iter().map(|b| (b.atom as usize, BondLabels::target(b.kind)))));
     }
 
     fn load_query(&mut self, q: &Query) {
@@ -566,7 +568,15 @@ pub fn target_features(kind: &FpKind, t: &Target) -> Vec<u64> {
 }
 
 pub fn query_features(kind: &FpKind, q: &Query) -> Vec<u64> {
-    feature_ids(query_keys(kind, q), kind.count_cap)
+    let mut ids = feature_ids(query_keys(kind, q), kind.count_cap);
+    // Recursive SMARTS that must hold also occur in the target; they may share
+    // atoms with the query, so merge the feature sets instead of adding counts.
+    for sub in q.required_subqueries() {
+        ids.extend(feature_ids(query_keys(kind, sub), kind.count_cap));
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 pub fn target_fp<const W: usize>(kind: &FpKind, t: &Target) -> Fp<W> {
@@ -578,9 +588,19 @@ pub fn target_fp<const W: usize>(kind: &FpKind, t: &Target) -> Fp<W> {
 }
 
 pub fn query_fp<const W: usize>(kind: &FpKind, q: &Query) -> Fp<W> {
-    with_scratch(|s| {
-        s.load_query(q);
-        s.collect(kind);
-        s.fold(kind)
-    })
+    let one = |q: &Query| {
+        with_scratch(|s| {
+            s.load_query(q);
+            s.collect(kind);
+            s.fold(kind)
+        })
+    };
+    let mut fp: Fp<W> = one(q);
+    // Required recursive SMARTS add their features (see `query_features`).
+    for sub in q.required_subqueries() {
+        for (w, x) in fp.iter_mut().zip(one(sub)) {
+            *w |= x;
+        }
+    }
+    fp
 }
