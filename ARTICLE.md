@@ -26,9 +26,13 @@ In the next iteration, I tried the next thing suggested by Maciej (and the RDKit
 
 ```python
 ...
+
+
 def to_pattern(mol):
     fp = PatternFingerprint(mol)
     return fp
+
+
 ...
 
 for r_smiles, r_mol in tqdm.tqdm(reactant_rows):
@@ -49,10 +53,15 @@ Roaring bitmaps are supposed to be more memory-efficient than standard bitmaps (
 
 ```python
 from pyroaring import BitMap
+
 ...
+
+
 def to_pattern(mol):
     fp = PatternFingerprint(mol)
     return BitMap(fp.GetOnBits())
+
+
 ...
 matches = []
 for r_smiles, r_mol in tqdm.tqdm(reactant_rows):

@@ -4,13 +4,20 @@
 //! report as a dict; `cli(args)` runs the command line and returns its exit
 //! code; `main()` is the `substructure_rs` console script installed by uv.
 //!
+//! For an index kept on disk (benchmark 11), each step is its own call, so
+//! Python can time it: `read_queries`, `Index.build`, `Index.save`,
+//! `Index.load`, `read_reactants` and `Index.match_many`. Each runs on the
+//! global rayon pool (`RAYON_NUM_THREADS`) without holding the GIL.
+//!
 //! Author: Marcin Kowiel + Claude
 
-use crate::{Options, Report};
+use crate::store::{self, StoredIndex};
+use crate::{read_column, Options, Report, Screen, Targets};
 use pyo3::exceptions::{PySystemExit, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
@@ -21,9 +28,8 @@ fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>>
     d.set_item("fp_kind", &r.fp_kind)?;
     d.set_item("fp_bits", r.fp_bits)?;
     d.set_item("order", &r.order)?;
-    d.set_item("read_seconds", r.read_seconds)?;
-    d.set_item("parse_queries_seconds", r.parse_queries_seconds)?;
-    d.set_item("parse_reactants_seconds", r.parse_reactants_seconds)?;
+    d.set_item("query_prep_seconds", r.query_prep_seconds)?;
+    d.set_item("reactant_prep_seconds", r.reactant_prep_seconds)?;
     d.set_item("build_seconds", r.build_seconds)?;
     d.set_item("match_seconds", r.match_seconds.clone())?;
     d.set_item("match_median_seconds", r.match_median())?;
@@ -107,9 +113,121 @@ fn main(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
+/// Parsed SMARTS queries; `Index.build` consumes them.
+#[pyclass(frozen, module = "substructure_rs")]
+struct Queries(Mutex<Option<store::Queries>>);
+
+#[pymethods]
+impl Queries {
+    fn __len__(&self) -> usize {
+        self.0.lock().unwrap().as_ref().map_or(0, store::Queries::len)
+    }
+}
+
+/// Reactants parsed and sanitized by this crate.
+#[pyclass(frozen, module = "substructure_rs")]
+struct Reactants(Targets);
+
+#[pymethods]
+impl Reactants {
+    fn __len__(&self) -> usize {
+        self.0 .0.len()
+    }
+}
+
+/// Read and parse the `substructure` column of a `.parquet` or `.csv` file.
+#[pyfunction]
+fn read_queries(py: Python<'_>, path: PathBuf) -> PyResult<Queries> {
+    let queries = py
+        .detach(|| store::Queries::parse(read_column(&path, "substructure")?))
+        .map_err(PyValueError::new_err)?;
+    Ok(Queries(Mutex::new(Some(queries))))
+}
+
+/// Read, parse and sanitize the `smiles` column of a `.parquet` or `.csv` file.
+#[pyfunction]
+fn read_reactants(py: Python<'_>, path: PathBuf) -> PyResult<Reactants> {
+    let targets = py
+        .detach(|| Screen::targets(&read_column(&path, "smiles")?))
+        .map_err(PyValueError::new_err)?;
+    Ok(Reactants(targets))
+}
+
+/// The posting-list index, built from queries or loaded from a file.
+#[pyclass(frozen, module = "substructure_rs")]
+struct Index(StoredIndex);
+
+#[pymethods]
+impl Index {
+    /// Fingerprint the queries and build the postings; consumes `queries`.
+    #[staticmethod]
+    #[pyo3(signature = (
+        queries,
+        fp_kind = crate::fingerprint::DEFAULT_FP_KIND.to_string(),
+        fp_bits = crate::fingerprint::DEFAULT_FP_BITS,
+        order = crate::matcher::DEFAULT_ORDER.to_string(),
+    ))]
+    fn build(py: Python<'_>, queries: &Queries, fp_kind: String, fp_bits: usize, order: String) -> PyResult<Self> {
+        let queries = queries.0.lock().unwrap().take().ok_or_else(|| PyValueError::new_err("queries already used"))?;
+        let index = py.detach(|| StoredIndex::build(queries, &fp_kind, fp_bits, &order)).map_err(PyValueError::new_err)?;
+        Ok(Index(index))
+    }
+
+    /// Read an index file written by `save`; parses its SMARTS again.
+    #[staticmethod]
+    fn load(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
+        let index = py.detach(|| StoredIndex::load(&path)).map_err(PyValueError::new_err)?;
+        Ok(Index(index))
+    }
+
+    fn save(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        py.detach(|| self.0.save(&path)).map_err(PyValueError::new_err)
+    }
+
+    /// Per reactant, the matching query IDs, ascending; and the pairs left
+    /// after the posting filter and after the full fingerprint check.
+    #[pyo3(signature = (reactants, postings = 128))]
+    fn match_many(&self, py: Python<'_>, reactants: &Reactants, postings: usize) -> PyResult<(Vec<Vec<u32>>, usize, usize)> {
+        let per = py.detach(|| self.0.match_many(&reactants.0, postings)).map_err(PyValueError::new_err)?;
+        let posted = per.iter().map(|f| f.posted).sum();
+        let candidates = per.iter().map(|f| f.candidates).sum();
+        Ok((per.into_iter().map(|f| f.found).collect(), posted, candidates))
+    }
+
+    fn __len__(&self) -> usize {
+        self.0.queries()
+    }
+
+    #[getter]
+    fn fp_kind(&self) -> &str {
+        self.0.fp_kind()
+    }
+
+    #[getter]
+    fn fp_bits(&self) -> usize {
+        self.0.fp_bits()
+    }
+
+    #[getter]
+    fn order(&self) -> &str {
+        self.0.order()
+    }
+
+    /// Bytes of the fingerprint and posting arrays in memory.
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.0.nbytes()
+    }
+}
+
 #[pymodule]
 fn substructure_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run, m)?)?;
+    m.add_function(wrap_pyfunction!(read_queries, m)?)?;
+    m.add_function(wrap_pyfunction!(read_reactants, m)?)?;
+    m.add_class::<Index>()?;
+    m.add_class::<Queries>()?;
+    m.add_class::<Reactants>()?;
     m.add_function(wrap_pyfunction!(cli, m)?)?;
     m.add_function(wrap_pyfunction!(main, m)?)?;
     m.add("USAGE", crate::USAGE)?;

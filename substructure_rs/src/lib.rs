@@ -20,6 +20,7 @@ mod mol;
 mod periodic;
 mod rings;
 mod smarts;
+pub mod store;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "python")]
@@ -124,9 +125,11 @@ pub struct Report {
     pub fp_kind: String,
     pub fp_bits: usize,
     pub order: String,
-    pub read_seconds: f64,
-    pub parse_queries_seconds: f64,
-    pub parse_reactants_seconds: f64,
+    /// Read and parse the SMARTS file.
+    pub query_prep_seconds: f64,
+    /// Read the SMILES file, parse and sanitize the reactants.
+    pub reactant_prep_seconds: f64,
+    /// Query fingerprints and postings.
     pub build_seconds: f64,
     pub match_seconds: Vec<f64>,
     /// Time inside matching by step, summed over reactants (CPU seconds, so
@@ -301,19 +304,17 @@ pub fn run(opts: &Options) -> Result<Report, String> {
 }
 
 fn run_in_pool(opts: &Options) -> Result<Report, String> {
+    // Each prep step reads its own file, as the Python benchmarks do.
     let start = Instant::now();
     let smarts = read_column(&opts.queries_file, "substructure")?;
-    let smiles = read_column(&opts.reactants_file, "smiles")?;
-    let read_seconds = start.elapsed().as_secs_f64();
-
-    let start = Instant::now();
     let queries = parse_all(&smarts, "query", smarts::parse_smarts)?;
-    let parse_queries_seconds = start.elapsed().as_secs_f64();
+    let query_prep_seconds = start.elapsed().as_secs_f64();
 
     let start = Instant::now();
+    let smiles = read_column(&opts.reactants_file, "smiles")?;
     let mols = parse_all(&smiles, "reactant", mol::parse_smiles)?;
     let targets: Vec<Target> = mols.par_iter().map(Target::new).collect();
-    let parse_reactants_seconds = start.elapsed().as_secs_f64();
+    let reactant_prep_seconds = start.elapsed().as_secs_f64();
     if let Some(path) = &opts.dump_atoms {
         dump_atoms(path, &mols).map_err(|e| format!("{}: {e}", path.display()))?;
     }
@@ -378,9 +379,8 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
         fp_kind: opts.fp_kind.clone(),
         fp_bits: opts.fp_bits,
         order: opts.order.clone(),
-        read_seconds,
-        parse_queries_seconds,
-        parse_reactants_seconds,
+        query_prep_seconds,
+        reactant_prep_seconds,
         build_seconds,
         match_seconds,
         phase_seconds,
@@ -396,59 +396,75 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
     })
 }
 
-/// Pairs that pass this crate's screen, for checking with another exact
-/// matcher (benchmark 10). Uses `queries_file`, `reactants_file`, `fp_kind`,
-/// `fp_bits`, `postings` and `threads` from `opts`.
-pub struct Candidates {
-    pub smarts: Vec<String>,
-    pub smiles: Vec<String>,
-    /// Per reactant, screened query IDs, ascending.
-    pub per_reactant: Vec<Vec<u32>>,
-    /// Wall-clock seconds for reactant fingerprints and the screen.
-    pub screen_seconds: f64,
+/// This crate's screen on its own, for another exact matcher (benchmark 10):
+/// build it from the SMARTS once, then screen reactants on every run. Uses
+/// `fp_kind`, `fp_bits`, `postings` and `order` from the options; runs on the
+/// current rayon pool.
+pub struct Screen {
+    inner: Box<dyn ScreenTargets>,
+    postings: usize,
 }
 
-pub fn candidates(opts: &Options) -> Result<Candidates, String> {
-    opts.validate()?;
-    let go = || {
-        let smarts = read_column(&opts.queries_file, "substructure")?;
-        let smiles = read_column(&opts.reactants_file, "smiles")?;
-        let queries = parse_all(&smarts, "query", smarts::parse_smarts)?;
-        let mols = parse_all(&smiles, "reactant", mol::parse_smiles)?;
-        let targets: Vec<Target> = mols.par_iter().map(Target::new).collect();
-        let kind = fp_kind(&opts.fp_kind)?;
-        let (per_reactant, screen_seconds) = match opts.fp_bits {
-            512 => screen_all::<8>(&kind, queries, &targets, opts),
-            1024 => screen_all::<16>(&kind, queries, &targets, opts),
-            2048 => screen_all::<32>(&kind, queries, &targets, opts),
-            4096 => screen_all::<64>(&kind, queries, &targets, opts),
-            8192 => screen_all::<128>(&kind, queries, &targets, opts),
-            16384 => screen_all::<256>(&kind, queries, &targets, opts),
-            other => return Err(format!("fingerprint size {other} not supported")),
-        };
-        Ok(Candidates { smarts, smiles, per_reactant, screen_seconds })
-    };
-    if opts.threads > 0 {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(opts.threads).build().map_err(|e| e.to_string())?;
-        pool.install(go)
-    } else {
-        go()
+/// Reactants parsed and sanitized by this crate, ready for `Screen::screen`.
+pub struct Targets(Vec<Target>);
+
+trait ScreenTargets: Send + Sync {
+    fn screen(&self, targets: &[Target], postings: usize) -> Vec<Vec<u32>>;
+}
+
+struct Built<const W: usize> {
+    kind: FpKind,
+    index: Index<W>,
+}
+
+impl<const W: usize> ScreenTargets for Built<W> {
+    fn screen(&self, targets: &[Target], postings: usize) -> Vec<Vec<u32>> {
+        targets
+            .par_iter()
+            .map(|t| {
+                let fp = target_fp::<W>(&self.kind, t);
+                let mut out = Vec::new();
+                self.index.subset_filter(&fp, &self.index.posting_filter(&fp, postings), &mut out);
+                out
+            })
+            .collect()
     }
 }
 
-fn screen_all<const W: usize>(kind: &FpKind, queries: Vec<Query>, targets: &[Target], opts: &Options) -> (Vec<Vec<u32>>, f64) {
-    let index = Index::<W>::build(kind, matcher::order(&opts.order).expect("validated"), queries);
-    let start = Instant::now();
-    let per = targets
-        .par_iter()
-        .map(|t| {
-            let fp = target_fp::<W>(kind, t);
-            let mut out = Vec::new();
-            index.subset_filter(&fp, &index.posting_filter(&fp, opts.postings), &mut out);
-            out
-        })
-        .collect();
-    (per, start.elapsed().as_secs_f64())
+impl Screen {
+    /// Parse the SMARTS with this crate's parser and build the index:
+    /// query fingerprints and postings.
+    pub fn build(smarts: &[String], opts: &Options) -> Result<Self, String> {
+        opts.validate()?;
+        let queries = parse_all(smarts, "query", smarts::parse_smarts)?;
+        let kind = fp_kind(&opts.fp_kind)?;
+        let order = matcher::order(&opts.order)?;
+        fn built<const W: usize>(kind: FpKind, order: matcher::Order, queries: Vec<Query>) -> Box<dyn ScreenTargets> {
+            Box::new(Built::<W> { kind, index: Index::<W>::build(&kind, order, queries) })
+        }
+        let inner = match opts.fp_bits {
+            512 => built::<8>(kind, order, queries),
+            1024 => built::<16>(kind, order, queries),
+            2048 => built::<32>(kind, order, queries),
+            4096 => built::<64>(kind, order, queries),
+            8192 => built::<128>(kind, order, queries),
+            16384 => built::<256>(kind, order, queries),
+            other => return Err(format!("fingerprint size {other} not supported")),
+        };
+        Ok(Screen { inner, postings: opts.postings })
+    }
+
+    /// Parse and sanitize reactant SMILES with this crate's parser.
+    pub fn targets(smiles: &[String]) -> Result<Targets, String> {
+        let mols = parse_all(smiles, "reactant", mol::parse_smiles)?;
+        Ok(Targets(mols.par_iter().map(Target::new).collect()))
+    }
+
+    /// Per reactant, the query IDs that pass the screen, ascending: reactant
+    /// fingerprints, the posting filter and the full fingerprint check.
+    pub fn screen(&self, targets: &Targets) -> Vec<Vec<u32>> {
+        self.inner.screen(&targets.0, self.postings)
+    }
 }
 
 /// Index build and timed matching runs for one fingerprint width.
@@ -550,9 +566,8 @@ pub fn print_report(r: &Report) {
         100.0 * r.query_density,
         100.0 * r.target_density
     );
-    println!("read files      {:>8.3} s", r.read_seconds);
-    println!("parse SMARTS    {:>8.3} s", r.parse_queries_seconds);
-    println!("parse SMILES    {:>8.3} s  (includes sanitization)", r.parse_reactants_seconds);
+    println!("query prep      {:>8.3} s  (read + parse SMARTS)", r.query_prep_seconds);
+    println!("reactant prep   {:>8.3} s  (read + parse + sanitize SMILES)", r.reactant_prep_seconds);
     println!(
         "build index     {:>8.3} s  ({:.1} MiB fingerprints + postings)",
         r.build_seconds,

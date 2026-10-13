@@ -9,19 +9,12 @@ runs in its own process so resident memory measurements do not overlap.
 
 import argparse
 import gc
-import hashlib
-import json
 import os
 import pickle
-import statistics
-import struct
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-import datamol as dm
-import pandas as pd
 import psutil
 
 root = str(Path(__file__).resolve().parents[1])
@@ -30,6 +23,21 @@ if root not in sys.path:
 from benchmarks.query_index import FP_SIZE
 from benchmarks.rust_process_query_index import RustProcessSubstructureQueryIndex
 from benchmarks.rust_query_index import RustSubstructureQueryIndex
+from benchmarks.report import (
+    Report,
+    digest_pairs,
+    found_pairs,
+    load_queries,
+    load_reactants,
+    mib,
+    print_report,
+    print_table,
+    print_worker,
+    run_variants,
+    screen_extras,
+)
+
+BACKENDS = ("rust", "process")
 
 
 def rss_bytes() -> int:
@@ -43,15 +51,9 @@ def run_worker(
     workers: int,
     reactants_file: Path,
     queries_file: Path,
-) -> dict:
-    smarts = pd.read_parquet(queries_file)["substructure"]
-    query_mols = [dm.convert.from_smarts(value) for value in smarts]
-    if any(mol is None for mol in query_mols):
-        raise ValueError("Failed to parse substructure SMARTS")
-    smiles = pd.read_csv(reactants_file)["smiles"]
-    reactant_mols = [dm.to_mol(value) for value in smiles]
-    if any(mol is None for mol in reactant_mols):
-        raise ValueError("Failed to parse reactant SMILES")
+) -> Report:
+    query_mols, query_prep = load_queries(queries_file)
+    reactant_mols, reactant_prep = load_reactants(reactants_file)
 
     gc.collect()
     rss_loaded = rss_bytes()
@@ -60,52 +62,68 @@ def run_worker(
         index = RustSubstructureQueryIndex.from_mols(query_mols)
     else:
         index = RustProcessSubstructureQueryIndex.from_mols(query_mols, workers)
-    build_seconds = time.perf_counter() - start
+    index_prep = time.perf_counter() - start
     gc.collect()
     rss_indexed = rss_bytes()
 
     times = []
-    digest = None
-    match_count = None
+    pairs = None
     for _ in range(runs):
         start = time.perf_counter()
         matches = index.match_many(reactant_mols, posting_limit)
         times.append(time.perf_counter() - start)
-        if digest is None:
-            query_ids = {id(mol): idx for idx, mol in enumerate(index.query_mols)}
-            hasher = hashlib.sha256()
-            match_count = 0
-            for reactant_idx, found in enumerate(matches):
-                for mol in found:
-                    hasher.update(struct.pack("<II", reactant_idx, query_ids[id(mol)]))
-                    match_count += 1
-            digest = hasher.hexdigest()
-            del query_ids
+        if pairs is None:
+            pairs = found_pairs(index.query_mols, matches)
         del matches
     gc.collect()
     rss_matched = rss_bytes()
 
+    # Untimed pass. The Rust screen returns only the IDs left after the full
+    # fingerprint check.
     rust = index if backend == "rust" else index.rust
+    posted = None
+    candidates = sum(map(len, rust.screen_many(reactant_mols, posting_limit)))
     bitmap_bytes = rust.postings.nbytes()
     index_bytes = bitmap_bytes + len(pickle.dumps(index.query_mols, protocol=5))
-    return {
-        "backend": backend,
-        "queries": len(query_mols),
-        "reactants": len(reactant_mols),
-        "matches": match_count,
-        "digest": digest,
-        "build_seconds": build_seconds,
-        "match_seconds": times,
-        "index_bytes": index_bytes,
-        "bitmap_bytes": bitmap_bytes,
-        "rss_loaded_bytes": rss_loaded,
-        "rss_indexed_bytes": rss_indexed,
-        "rss_matched_bytes": rss_matched,
-    }
-
-
-def mib(value: int) -> str:
-    return f"{value / 1024**2:.1f}"
+    total_pairs = len(query_mols) * len(reactant_mols)
+    return Report(
+        benchmark="07_rust_postings_process",
+        variant=backend,
+        queries=len(query_mols),
+        reactants=len(reactant_mols),
+        match_seconds=times,
+        matches=len(pairs),
+        digest=digest_pairs(pairs),
+        query_prep_seconds=query_prep,
+        index_prep_seconds=index_prep,
+        reactant_prep_seconds=reactant_prep,
+        settings={
+            "postings": posting_limit,
+            "runs": runs,
+            "workers": workers if backend == "process" else 1,
+        },
+        notes={
+            "query": "read + parse SMARTS",
+            "index": "Pattern fingerprints + Rust postings",
+            "reactant": "read + parse SMILES",
+            "matching": "reactant fingerprints + postings + fp check + exact match",
+        },
+        extras=[
+            *screen_extras(total_pairs, posted, candidates, len(pairs)),
+            ("index size", mib(index_bytes), "postings + pickled query molecules"),
+            ("bitmap size", mib(bitmap_bytes), "fingerprints + postings only"),
+            (
+                "build RSS delta",
+                mib(rss_indexed - rss_loaded),
+                "resident memory after build minus after load",
+            ),
+            (
+                "RSS",
+                f"{mib(rss_loaded)} / {mib(rss_indexed)} / {mib(rss_matched)}",
+                "after load / build / matching",
+            ),
+        ],
+    )
 
 
 def main() -> None:
@@ -134,30 +152,23 @@ def main() -> None:
     if args.worker:
         if args.backend == "both":
             parser.error("--worker requires one backend")
-        print(
-            json.dumps(
-                run_worker(
-                    args.backend,
-                    args.postings,
-                    args.runs,
-                    args.workers,
-                    args.reactants_file,
-                    args.queries_file,
-                )
+        print_worker(
+            run_worker(
+                args.backend,
+                args.postings,
+                args.runs,
+                args.workers,
+                args.reactants_file,
+                args.queries_file,
             )
         )
         return
 
-    backends = ("rust", "process") if args.backend == "both" else (args.backend,)
-    results = []
-    for backend in backends:
-        print(f"Running {backend}...", flush=True)
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--worker",
-            "--backend",
-            backend,
+    reports = run_variants(
+        str(Path(__file__).resolve()),
+        "backend",
+        BACKENDS if args.backend == "both" else (args.backend,),
+        [
             "--postings",
             str(args.postings),
             "--runs",
@@ -168,46 +179,19 @@ def main() -> None:
             str(args.reactants_file),
             "--queries-file",
             str(args.queries_file),
-        ]
-        completed = subprocess.run(command, text=True, capture_output=True, check=True)
-        results.append(json.loads(completed.stdout))
-
-    if len(results) == 2 and (results[0]["matches"], results[0]["digest"]) != (
-        results[1]["matches"],
-        results[1]["digest"],
-    ):
-        raise RuntimeError(
-            "Serial and process-parallel Rust indexes returned different matches"
-        )
-
-    print(
-        f"{results[0]['queries']:,} queries x {results[0]['reactants']:,} reactants; "
-        f"{args.postings} postings; {args.runs} matching runs per backend; "
-        f"{args.workers} workers for process"
+        ],
     )
+    for report in reports:
+        print_report(report)
+    if len(reports) > 1:
+        print_table(reports, ["exact matches run", "bitmap size"])
+        if len({r.digest for r in reports}) > 1:
+            raise RuntimeError(
+                "Serial and process-parallel Rust indexes returned different matches"
+            )
     print(
-        "backend   build s  match median s    index MiB  bitmaps MiB  "
-        "build RSS ΔMiB  RSS load/build/match MiB"
-    )
-    for result in results:
-        print(
-            f"{result['backend']:<9} {result['build_seconds']:>7.3f}  "
-            f"{statistics.median(result['match_seconds']):>14.3f}  "
-            f"{mib(result['index_bytes']):>11}  "
-            f"{mib(result['bitmap_bytes']):>11}  "
-            f"{mib(result['rss_indexed_bytes'] - result['rss_loaded_bytes']):>14}  "
-            f"{mib(result['rss_loaded_bytes'])}/"
-            f"{mib(result['rss_indexed_bytes'])}/"
-            f"{mib(result['rss_matched_bytes'])}"
-        )
-        print(
-            f"  matching runs: {[round(value, 3) for value in result['match_seconds']]}; "
-            f"matches: {result['matches']:,}"
-        )
-    print(
-        "RSS values are resident memory after data load, index build, and matching, "
-        "each in a fresh process; build RSS Δ is the build-minus-load change. "
-        "OS paging can change these values, so the delta is not an index size."
+        "RSS values are resident memory in a fresh process per backend. OS paging can "
+        "change them, so the build delta is not an index size."
     )
 
 

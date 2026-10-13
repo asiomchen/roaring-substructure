@@ -18,12 +18,14 @@ fn report_dict<'py>(py: Python<'py>, r: &Report) -> PyResult<Bound<'py, PyDict>>
     d.set_item("queries", r.queries)?;
     d.set_item("reactants", r.reactants)?;
     d.set_item("threads", r.threads)?;
-    d.set_item("parse_queries_seconds", r.parse_queries_seconds)?;
-    d.set_item("parse_reactants_seconds", r.parse_reactants_seconds)?;
-    d.set_item("screen_seconds", r.screen_seconds)?;
+    d.set_item("query_prep_seconds", r.query_prep_seconds)?;
+    d.set_item("reactant_prep_seconds", r.reactant_prep_seconds)?;
+    d.set_item("index_prep_seconds", r.index_prep_seconds)?;
     d.set_item("pairs", r.pairs)?;
     d.set_item("match_seconds", r.match_seconds.clone())?;
     d.set_item("match_median_seconds", r.match_median())?;
+    d.set_item("exact_seconds", r.exact_seconds.clone())?;
+    d.set_item("exact_median_seconds", r.exact_median())?;
     d.set_item("matches", r.matches)?;
     d.set_item("digest", &r.digest)?;
     if let Some((n, missing, extra)) = r.comparison {

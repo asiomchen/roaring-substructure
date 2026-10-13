@@ -9,9 +9,13 @@
 //! - `naive`: chematic parses everything and runs `has_match_with_config` on
 //!   every (reactant, query) pair, like benchmark 01 does with RDKit.
 //! - `screened`: `substructure_rs` screens the pairs with its fingerprint and
-//!   postings (outside the timer), and chematic checks only the candidates,
-//!   so the timer measures chematic's exact matcher on the pairs that
-//!   benchmark 08's own matcher sees.
+//!   postings, and chematic checks only the candidates, the pairs benchmark
+//!   08's own matcher sees.
+//!
+//! Timed like the other benchmarks: query and reactant prep each read and
+//! parse their file, the screen's index is built once (index prep), and each
+//! matching run screens every reactant and runs the exact matches. The exact
+//! match alone is reported too (`exact_seconds`).
 //!
 //! The digest uses the same encoding as benchmarks 05a-09.
 //!
@@ -94,24 +98,38 @@ pub struct Report {
     pub queries: usize,
     pub reactants: usize,
     pub threads: usize,
-    pub parse_queries_seconds: f64,
-    pub parse_reactants_seconds: f64,
-    /// `screened` only: substructure_rs's reactant fingerprints and screen (not in the timer).
-    pub screen_seconds: Option<f64>,
+    /// Read the SMARTS file and parse it with chematic.
+    pub query_prep_seconds: f64,
+    /// Read the SMILES file and parse it with chematic; `screened` also parses
+    /// and sanitizes it with substructure_rs for its screen.
+    pub reactant_prep_seconds: f64,
+    /// `screened` only: substructure_rs parses the SMARTS and builds its index.
+    pub index_prep_seconds: Option<f64>,
     /// Pairs given to chematic's matcher per run.
     pub pairs: usize,
+    /// Per run: the screen (in `screened`) and chematic's exact match.
     pub match_seconds: Vec<f64>,
+    /// Per run: chematic's exact match alone.
+    pub exact_seconds: Vec<f64>,
     pub matches: usize,
     pub digest: String,
     /// (reference pairs, missing, extra) against `--reference`.
     pub comparison: Option<(usize, usize, usize)>,
 }
 
+fn median(times: &[f64]) -> f64 {
+    let mut sorted = times.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
 impl Report {
     pub fn match_median(&self) -> f64 {
-        let mut sorted = self.match_seconds.clone();
-        sorted.sort_by(f64::total_cmp);
-        sorted[sorted.len() / 2]
+        median(&self.match_seconds)
+    }
+
+    pub fn exact_median(&self) -> f64 {
+        median(&self.exact_seconds)
     }
 }
 
@@ -187,45 +205,44 @@ pub fn run(opts: &Options) -> Result<Report, String> {
 }
 
 fn run_in_pool(opts: &Options) -> Result<Report, String> {
-    // Candidate query IDs per reactant: every query, or substructure_rs's screen.
-    let (smarts, smiles, candidates, screen_seconds) = match opts.mode {
-        Mode::Naive => {
-            let smarts = substructure_rs::read_column(&opts.queries_file, "substructure")?;
-            let smiles = substructure_rs::read_column(&opts.reactants_file, "smiles")?;
-            (smarts, smiles, None, None)
-        }
-        Mode::Screened => {
-            let screen_opts = substructure_rs::Options {
-                queries_file: opts.queries_file.clone(),
-                reactants_file: opts.reactants_file.clone(),
-                fp_kind: opts.fp_kind.clone(),
-                fp_bits: opts.fp_bits,
-                postings: opts.postings,
-                threads: opts.threads,
-                ..Default::default()
-            };
-            let c = substructure_rs::candidates(&screen_opts)?;
-            (c.smarts, c.smiles, Some(c.per_reactant), Some(c.screen_seconds))
-        }
-    };
-
+    // Timed like the other benchmarks: each prep step reads its own file, the
+    // index is built once, and every matching run screens and matches all pairs.
     let start = Instant::now();
+    let smarts = substructure_rs::read_column(&opts.queries_file, "substructure")?;
     let queries: Vec<QueryMolecule> = parse_all(&smarts, "query", parse_smarts)?;
-    let parse_queries_seconds = start.elapsed().as_secs_f64();
+    let query_prep_seconds = start.elapsed().as_secs_f64();
+
+    let screened = opts.mode == Mode::Screened;
     let start = Instant::now();
+    let smiles = substructure_rs::read_column(&opts.reactants_file, "smiles")?;
     let mols: Vec<Molecule> = parse_all(&smiles, "reactant", chematic_smiles::parse)?;
-    let parse_reactants_seconds = start.elapsed().as_secs_f64();
+    let targets = if screened { Some(substructure_rs::Screen::targets(&smiles)?) } else { None };
+    let reactant_prep_seconds = start.elapsed().as_secs_f64();
+
+    let (screen, index_prep_seconds) = if screened {
+        let screen_opts = substructure_rs::Options {
+            fp_kind: opts.fp_kind.clone(),
+            fp_bits: opts.fp_bits,
+            postings: opts.postings,
+            ..Default::default()
+        };
+        let start = Instant::now();
+        let screen = substructure_rs::Screen::build(&smarts, &screen_opts)?;
+        (Some(screen), Some(start.elapsed().as_secs_f64()))
+    } else {
+        (None, None)
+    };
 
     let all: Vec<u32> = (0..queries.len() as u32).collect();
-    let pairs = match &candidates {
-        Some(c) => c.iter().map(Vec::len).sum(),
-        None => queries.len() * mols.len(),
-    };
     let config = MatchConfig::default();
     let mut match_seconds = Vec::new();
+    let mut exact_seconds = Vec::new();
+    let mut pairs = 0;
     let mut result = None;
     for _ in 0..opts.runs {
         let start = Instant::now();
+        let candidates = screen.as_ref().zip(targets.as_ref()).map(|(s, t)| s.screen(t));
+        let exact_start = Instant::now();
         let per: Vec<Vec<u32>> = mols
             .par_iter()
             .enumerate()
@@ -234,7 +251,9 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
                 cands.iter().copied().filter(|&q| has_match_with_config(&queries[q as usize], mol, &config)).collect()
             })
             .collect();
+        exact_seconds.push(exact_start.elapsed().as_secs_f64());
         match_seconds.push(start.elapsed().as_secs_f64());
+        pairs = candidates.as_ref().map_or(queries.len() * mols.len(), |c| c.iter().map(Vec::len).sum());
         result.get_or_insert(per);
     }
     let per = result.expect("at least one run");
@@ -268,11 +287,12 @@ fn run_in_pool(opts: &Options) -> Result<Report, String> {
         queries: queries.len(),
         reactants: mols.len(),
         threads: rayon::current_num_threads(),
-        parse_queries_seconds,
-        parse_reactants_seconds,
-        screen_seconds,
+        query_prep_seconds,
+        reactant_prep_seconds,
+        index_prep_seconds,
         pairs,
         match_seconds,
+        exact_seconds,
         matches,
         digest,
         comparison,
@@ -288,16 +308,16 @@ pub fn print_report(r: &Report) {
         r.match_seconds.len(),
         r.threads
     );
-    println!("parse SMARTS    {:>8.3} s  (chematic)", r.parse_queries_seconds);
-    println!("parse SMILES    {:>8.3} s  (chematic)", r.parse_reactants_seconds);
-    if let Some(s) = r.screen_seconds {
-        println!("screen          {:>8.3} s  (substructure_rs fingerprints + postings, not in the timer)", s);
+    println!("query prep      {:>8.3} s  (read + parse SMARTS, chematic)", r.query_prep_seconds);
+    println!("reactant prep   {:>8.3} s  (read + parse SMILES)", r.reactant_prep_seconds);
+    if let Some(s) = r.index_prep_seconds {
+        println!("index prep      {:>8.3} s  (substructure_rs index for the screen)", s);
     }
     println!(
         "match median    {:>8.3} s  runs: {:?}  ({:.0} ns per pair per thread)",
         r.match_median(),
         r.match_seconds.iter().map(|t| (t * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
-        1e9 * r.match_median() * r.threads as f64 / r.pairs.max(1) as f64
+        1e9 * r.exact_median() * r.threads as f64 / r.pairs.max(1) as f64
     );
     println!("pairs checked   {:>8}  matches: {}", r.pairs, r.matches);
     println!("digest          {}", r.digest);

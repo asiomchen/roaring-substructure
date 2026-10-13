@@ -11,7 +11,7 @@
 use crate::fingerprint::{query_features, target_features, FpKind};
 use crate::index::Index;
 use crate::matcher::{has_match, has_match_counted, Plan, SearchCounts, Target};
-use crate::smarts::{BondQuery, Expr, Prim, Query};
+use crate::smarts::{BondQuery, Expr, Prim, Prop, Query};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -24,6 +24,7 @@ const SINGLE: usize = 6;
 fn touches(e: &Expr, drop: &dyn Fn(&Prim) -> Option<Expr>) -> bool {
     match e {
         Expr::Prim(p) => drop(p).is_some(),
+        Expr::Recursive(_) => false,
         Expr::Not(inner) => touches(inner, drop),
         Expr::And(es) | Expr::Or(es) => es.iter().any(|x| touches(x, drop)),
     }
@@ -32,6 +33,8 @@ fn touches(e: &Expr, drop: &dyn Fn(&Prim) -> Option<Expr>) -> bool {
 fn relax_expr(e: &Expr, drop: &dyn Fn(&Prim) -> Option<Expr>) -> Expr {
     match e {
         Expr::Prim(p) => drop(p).unwrap_or_else(|| e.clone()),
+        // Left as is: loosening the rest keeps the relaxed query a superset.
+        Expr::Recursive(_) => e.clone(),
         // Loosening under a negation would tighten it; drop the whole negation instead.
         Expr::Not(inner) if touches(inner, drop) => Expr::Prim(Prim::True),
         Expr::Not(_) => e.clone(),
@@ -44,8 +47,8 @@ fn relax(q: &Query, kind: usize) -> Query {
     let mut q = q.clone();
     let drop: &dyn Fn(&Prim) -> Option<Expr> = match kind {
         0 => &|p| matches!(p, Prim::TotalH(_)).then_some(Expr::Prim(Prim::True)),
-        1 => &|p| matches!(p, Prim::Degree(_)).then_some(Expr::Prim(Prim::True)),
-        2 => &|p| matches!(p, Prim::Charge(_)).then_some(Expr::Prim(Prim::True)),
+        1 => &|p| matches!(p, Prim::Num { prop: Prop::Degree, .. }).then_some(Expr::Prim(Prim::True)),
+        2 => &|p| matches!(p, Prim::Charge(_) | Prim::ChargeRange { .. }).then_some(Expr::Prim(Prim::True)),
         3 => &|p| match *p {
             Prim::Aromatic(_) => Some(Expr::Prim(Prim::True)),
             Prim::Element { z, aromatic: Some(_) } => Some(Expr::Prim(Prim::Element { z, aromatic: None })),
@@ -64,7 +67,7 @@ fn relax(q: &Query, kind: usize) -> Query {
     }
     if kind == 5 || kind == 7 {
         for b in &mut q.bonds {
-            b.query = BondQuery::Any;
+            b.query = BondQuery::ANY;
         }
     }
     q
