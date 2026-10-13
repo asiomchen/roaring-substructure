@@ -190,7 +190,8 @@ def figure(out: Path, stem: str, **kwargs):
         out.mkdir(parents=True, exist_ok=True)
         for suffix in ("png", "svg"):
             path = out / f"{stem}.{suffix}"
-            fig.savefig(path, dpi=300)
+            # 600 dpi on opaque white: sharp when a slide scales the PNG up.
+            fig.savefig(path, dpi=600, facecolor="white")
             print(f"wrote {path}")
         plt.close(fig)
 

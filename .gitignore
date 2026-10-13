@@ -11,3 +11,4 @@ wheels/
 *log
 # Benchmark output (match sets and query plans)
 benchmarks/postgres/artifacts/
+.DS_Store
