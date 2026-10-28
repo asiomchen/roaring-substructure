@@ -114,7 +114,7 @@ impl<const W: usize> Index<W> {
             while word != 0 {
                 let idx = w * 64 + word.trailing_zeros() as usize;
                 word &= word - 1;
-                if self.fps[idx].iter().zip(fp).all(|(&q, &t)| q & !t == 0) {
+                if is_subset(&self.fps[idx], fp) {
                     out.push(idx as u32);
                 }
             }
@@ -144,6 +144,14 @@ impl<const W: usize> Index<W> {
             ],
         }
     }
+}
+
+/// Whether every bit of `q` is set in `t`. Compares 16 words per step with no
+/// early exit inside the step, so each step compiles to vector instructions.
+#[inline]
+fn is_subset<const W: usize>(q: &Fp<W>, t: &Fp<W>) -> bool {
+    const STEP: usize = 16;
+    q.chunks(STEP).zip(t.chunks(STEP)).all(|(q, t)| q.iter().zip(t).fold(0, |acc, (&q, &t)| acc | q & !t) == 0)
 }
 
 /// One reactant's result.
