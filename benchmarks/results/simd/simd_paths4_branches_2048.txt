@@ -1,0 +1,12 @@
+fingerprint     paths4+branches at 2048 bits; 10.2% of bits set in queries, 19.5% in reactants
+match median       0.021 s  runs: [0.022, 0.021, 0.021, 0.021, 0.021]
+  of which      0.014 s reactant fingerprints, 0.092 s postings, 0.039 s fingerprint check, 0.145 s exact match (summed over threads)
+digest          ddeaf4f4d37bef8785375f76fe5ba354518e95a2eb96ac8ee349ab6b84f420c3
+fingerprint     paths4+branches at 2048 bits; 10.2% of bits set in queries, 19.5% in reactants
+match median       0.021 s  runs: [0.022, 0.02, 0.021, 0.021, 0.021]
+  of which      0.014 s reactant fingerprints, 0.090 s postings, 0.037 s fingerprint check, 0.144 s exact match (summed over threads)
+digest          ddeaf4f4d37bef8785375f76fe5ba354518e95a2eb96ac8ee349ab6b84f420c3
+fingerprint     paths4+branches at 2048 bits; 10.2% of bits set in queries, 19.5% in reactants
+match median       0.021 s  runs: [0.023, 0.021, 0.021, 0.021, 0.021]
+  of which      0.014 s reactant fingerprints, 0.091 s postings, 0.037 s fingerprint check, 0.148 s exact match (summed over threads)
+digest          ddeaf4f4d37bef8785375f76fe5ba354518e95a2eb96ac8ee349ab6b84f420c3
